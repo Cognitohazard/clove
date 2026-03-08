@@ -190,11 +190,13 @@ class ClaudeAPIProcessor(BaseProcessor):
                     logger.error(
                         f"Claude API error: {response.status_code} - {error_data}"
                     )
+                    # invalid_request_error 是请求本身有问题，重试不会改变结果
                     raise ClaudeHttpError(
                         url=self.messages_api_url,
                         status_code=response.status_code,
                         error_type=error_type,
                         error_message=error_message,
+                        retryable=error_type != "invalid_request_error",
                     )
 
                 async def stream_response():

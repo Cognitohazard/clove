@@ -136,6 +136,7 @@ class ClaudeHttpError(AppError):
         error_type: str,
         error_message: Any,
         context: Optional[Dict[str, Any]] = None,
+        retryable: bool = True,
     ):
         _context = context.copy() if context else {}
         _context.update({
@@ -149,7 +150,7 @@ class ClaudeHttpError(AppError):
             message_key="claudeClient.httpError",
             status_code=status_code,
             context=_context,
-            retryable=True,
+            retryable=retryable,
         )
 
 
@@ -182,6 +183,19 @@ class ExternalImageNotAllowedError(AppError):
         super().__init__(
             error_code=400142,
             message_key="messageProcessor.externalImageNotAllowed",
+            status_code=400,
+            context=_context,
+        )
+
+
+# 文件数量超出 Claude.ai Web 端限制
+class TooManyFilesError(AppError):
+    def __init__(self, count: int, limit: int, context: Optional[Dict[str, Any]] = None):
+        _context = context.copy() if context else {}
+        _context.update({"count": count, "limit": limit})
+        super().__init__(
+            error_code=400143,
+            message_key="messageProcessor.tooManyFiles",
             status_code=400,
             context=_context,
         )

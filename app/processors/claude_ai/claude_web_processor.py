@@ -10,7 +10,7 @@ from app.processors.claude_ai import ClaudeAIContext
 from app.services.session import session_manager
 from app.models.internal import ClaudeWebRequest, Attachment
 from app.models.claude import Tool
-from app.core.exceptions import NoValidMessagesError
+from app.core.exceptions import NoValidMessagesError, TooManyFilesError
 from app.core.config import settings
 from app.utils.messages import process_messages
 
@@ -75,19 +75,7 @@ class ClaudeWebProcessor(BaseProcessor):
             )
             return context
 
-        # Step 1: Get or create Claude session
-        if not context.claude_session:
-            session_id = context.metadata.get("session_id")
-            if not session_id:
-                session_id = f"session_{int(time.time() * 1000)}"
-                context.metadata["session_id"] = session_id
-
-            logger.debug(f"Creating new session: {session_id}")
-            context.claude_session = await session_manager.get_or_create_session(
-                session_id
-            )
-
-        # Step 2: Build ClaudeWebRequest
+        # Step 1: Validate and prepare request data (no session needed)
         if not context.claude_web_request:
             request = context.messages_api_request
 
@@ -100,6 +88,11 @@ class ClaudeWebProcessor(BaseProcessor):
             if not merged_text and not images:
                 raise NoValidMessagesError()
 
+            # Claude.ai Web 端限制每次请求最多 20 个文件
+            MAX_WEB_FILES = 20
+            if len(images) > MAX_WEB_FILES:
+                raise TooManyFilesError(count=len(images), limit=MAX_WEB_FILES)
+
             if settings.padtxt_length > 0:
                 pad_tokens = settings.pad_tokens or (
                     string.ascii_letters + string.digits
@@ -110,6 +103,19 @@ class ClaudeWebProcessor(BaseProcessor):
                     f"Added {settings.padtxt_length} padding tokens to the beginning of the message"
                 )
 
+            # Step 2: Get or create Claude session (only after validation passes)
+            if not context.claude_session:
+                session_id = context.metadata.get("session_id")
+                if not session_id:
+                    session_id = f"session_{int(time.time() * 1000)}"
+                    context.metadata["session_id"] = session_id
+
+                logger.debug(f"Creating new session: {session_id}")
+                context.claude_session = await session_manager.get_or_create_session(
+                    session_id
+                )
+
+            # Step 3: Upload files and build request
             image_file_ids: List[str] = []
             if images:
                 for i, image_source in enumerate(images):

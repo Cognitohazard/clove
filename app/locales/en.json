@@ -28,7 +28,8 @@
   "messageProcessor": {
     "noValidMessages": "No valid messages found in the request.",
     "externalImageDownloadError": "Failed to download external image from: {url}",
-    "externalImageNotAllowed": "External images are not allowed: {url}"
+    "externalImageNotAllowed": "External images are not allowed: {url}",
+    "tooManyFiles": "File count ({count}) exceeds Claude.ai limit (max {limit})."
   },
   "pipeline": {
     "noResponse": "No response received from the service. Please try again."

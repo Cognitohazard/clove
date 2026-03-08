@@ -28,7 +28,8 @@
   "messageProcessor": {
     "noValidMessages": "请求中未找到有效消息。",
     "externalImageDownloadError": "无法从以下地址下载外部图片：{url}",
-    "externalImageNotAllowed": "不允许使用外部图片：{url}"
+    "externalImageNotAllowed": "不允许使用外部图片：{url}",
+    "tooManyFiles": "文件数量（{count}）超出 Claude.ai 限制（最多 {limit} 个）。"
   },
   "pipeline": {
     "noResponse": "未收到服务响应。请重试。"
