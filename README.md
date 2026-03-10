@@ -27,14 +27,15 @@ docker run -d --name clove --restart unless-stopped \
   -p 5201:5201 -v ./data:/data \
   -e HOST=0.0.0.0 -e PORT=5201 -e DATA_FOLDER=/data \
   -e LOG_LEVEL=INFO -e LOG_TO_FILE=true -e LOG_FILE_PATH=/data/logs/app.log \
-  ghcr.io/huan-zhaojun/clove:latest
+  ghcr.io/<your-github-username>/clove:latest
 ```
 
 ### 方式二：Docker Compose
 
+下载本仓库里的 `docker-compose.yml` 后运行：
+
 ```bash
 mkdir -p clove && cd clove
-curl -sO https://raw.githubusercontent.com/Huan-zhaojun/clove/main/docker-compose.yml
 docker compose up -d
 ```
 
@@ -205,9 +206,8 @@ response = client.messages.create(
 
 如有问题或建议，欢迎通过以下方式联系：
 
-- 提交 [Issue](https://github.com/mirrorange/clove/issues)
+- 提交 [Issue](issues)
 - 发送 Pull Request
-- 发送邮件至：orange@freesia.ink
 
 ## 🌸 关于 Clove
 
@@ -216,5 +216,5 @@ response = client.messages.create(
 ---
 
 <div align="center">
-Made with ❤️ by 🍊
+Made with Clove
 </div>

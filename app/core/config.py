@@ -163,6 +163,11 @@ class Settings(BaseSettings):
 
     # Content processing
     custom_prompt: Optional[str] = Field(default=None, env="CUSTOM_PROMPT")
+    inject_claude_code_system_prompt: bool = Field(
+        default=True,
+        env="INJECT_CLAUDE_CODE_SYSTEM_PROMPT",
+        description="Prepend the legacy Claude Code identity prompt on the OAuth/API path",
+    )
     use_real_roles: bool = Field(default=True, env="USE_REAL_ROLES")
     human_name: str = Field(default="Human", env="CUSTOM_HUMAN_NAME")
     assistant_name: str = Field(default="Assistant", env="CUSTOM_ASSISTANT_NAME")

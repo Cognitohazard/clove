@@ -23,6 +23,7 @@ class SettingsRead(BaseModel):
     claude_api_baseurl: HttpUrl
 
     custom_prompt: str | None
+    inject_claude_code_system_prompt: bool
     use_real_roles: bool
     human_name: str
     assistant_name: str
@@ -50,6 +51,7 @@ class SettingsUpdate(BaseModel):
     claude_api_baseurl: HttpUrl | None = None
 
     custom_prompt: str | None = None
+    inject_claude_code_system_prompt: bool | None = None
     use_real_roles: bool | None = None
     human_name: str | None = None
     assistant_name: str | None = None

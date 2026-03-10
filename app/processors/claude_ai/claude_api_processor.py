@@ -9,7 +9,7 @@ from typing import Dict, Optional
 from loguru import logger
 from fastapi.responses import StreamingResponse
 
-from app.models.claude import MessagesAPIRequest
+from app.models.claude import MessagesAPIRequest, TextContent
 from app.processors.base import BaseProcessor
 from app.processors.claude_ai import ClaudeAIContext
 from app.services.account import account_manager
@@ -28,6 +28,10 @@ from app.core.config import settings
 
 class ClaudeAPIProcessor(BaseProcessor):
     """Processor that calls Claude Messages API directly using OAuth authentication."""
+
+    LEGACY_CLAUDE_CODE_SYSTEM_PROMPT = (
+        "You are Claude Code, Anthropic's official CLI for Claude."
+    )
 
     def __init__(self):
         self.messages_api_url = (
@@ -68,6 +72,8 @@ class ClaudeAPIProcessor(BaseProcessor):
             return context
 
         try:
+            self._maybe_insert_system_message(context)
+
             # First try to get account from cache service
             cached_account_id, checkpoints = cache_service.process_messages(
                 context.messages_api_request.model,
@@ -232,6 +238,32 @@ class ClaudeAPIProcessor(BaseProcessor):
             logger.debug("No accounts available for Claude API, continuing pipeline")
 
         return context
+
+    def _maybe_insert_system_message(self, context: ClaudeAIContext) -> None:
+        """Optionally prepend the legacy Claude Code identity prompt."""
+        if not settings.inject_claude_code_system_prompt:
+            return
+
+        request = context.messages_api_request
+        if not request:
+            return
+
+        system_message = TextContent(
+            type="text", text=self.LEGACY_CLAUDE_CODE_SYSTEM_PROMPT
+        )
+
+        if isinstance(request.system, str) and request.system:
+            request.system = [
+                system_message,
+                TextContent(type="text", text=request.system),
+            ]
+        elif isinstance(request.system, list) and request.system:
+            if request.system[0].text == self.LEGACY_CLAUDE_CODE_SYSTEM_PROMPT:
+                logger.debug("Legacy Claude Code system prompt already present")
+            else:
+                request.system = [system_message] + request.system
+        else:
+            request.system = [system_message]
 
     def _prepare_headers(
         self,

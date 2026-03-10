@@ -27,10 +27,15 @@ from app.models.claude import (
 class CacheCheckpoint:
     """Cache checkpoint with timestamp."""
 
-    def __init__(self, checkpoint: str, account_id: str):
+    def __init__(self, checkpoint: str, account_id: str, ttl_seconds: int):
         self.checkpoint = checkpoint
         self.account_id = account_id
         self.created_at = datetime.now()
+        self.ttl_seconds = ttl_seconds
+
+    @property
+    def expires_at(self) -> datetime:
+        return self.created_at + timedelta(seconds=self.ttl_seconds)
 
 
 class CacheService:
@@ -66,7 +71,7 @@ class CacheService:
         model: str,
         messages: List[InputMessage],
         system: Optional[List[TextContent]] = None,
-    ) -> Tuple[Optional[str], List[str]]:
+    ) -> Tuple[Optional[str], List[Tuple[str, int]]]:
         """
         Process messages to find cached account and extract new checkpoints.
 
@@ -77,10 +82,10 @@ class CacheService:
         Returns:
             Tuple of (account_id, checkpoints) where:
             - account_id: The account ID if a cached prompt was found, None otherwise
-            - checkpoints: List of feature values for content blocks with cache_control
+            - checkpoints: List of (feature value, ttl_seconds) for content blocks with cache_control
         """
         account_id: Optional[str] = None
-        checkpoints: List[str] = []
+        checkpoints: List[Tuple[str, int]] = []
 
         hasher = hashlib.sha256()
 
@@ -94,7 +99,12 @@ class CacheService:
                 feature_value = hasher.hexdigest()
 
                 if text_content.cache_control:
-                    checkpoints.append(feature_value)
+                    checkpoints.append(
+                        (
+                            feature_value,
+                            self._resolve_ttl_seconds(text_content.cache_control.ttl),
+                        )
+                    )
 
                 if feature_value in self._checkpoints:
                     account_id = self._checkpoints[feature_value].account_id
@@ -115,7 +125,14 @@ class CacheService:
                         hasattr(content_block, "cache_control")
                         and content_block.cache_control
                     ):
-                        checkpoints.append(feature_value)
+                        checkpoints.append(
+                            (
+                                feature_value,
+                                self._resolve_ttl_seconds(
+                                    content_block.cache_control.ttl
+                                ),
+                            )
+                        )
 
                     if feature_value in self._checkpoints:
                         account_id = self._checkpoints[feature_value].account_id
@@ -127,18 +144,23 @@ class CacheService:
 
         return account_id, checkpoints
 
-    def add_checkpoints(self, checkpoints: List[str], account_id: str) -> None:
+    def add_checkpoints(
+        self, checkpoints: List[Tuple[str, int]], account_id: str
+    ) -> None:
         """
         Add checkpoint mappings to the cache.
 
         Args:
-            checkpoints: List of feature values to map
+            checkpoints: List of (feature value, ttl_seconds) pairs to map
             account_id: Account ID to map to
         """
-        for checkpoint in checkpoints:
-            self._checkpoints[checkpoint] = CacheCheckpoint(checkpoint, account_id)
+        for checkpoint, ttl_seconds in checkpoints:
+            self._checkpoints[checkpoint] = CacheCheckpoint(
+                checkpoint, account_id, ttl_seconds
+            )
             logger.debug(
-                f"Added checkpoint mapping: {checkpoint[:16]}... -> {account_id}"
+                f"Added checkpoint mapping: {checkpoint[:16]}... -> {account_id} "
+                f"(ttl={ttl_seconds}s)"
             )
 
         logger.debug(
@@ -160,6 +182,14 @@ class CacheService:
         # Add a delimiter to ensure proper separation between blocks
         hasher.update(b"\x00")  # NULL byte as delimiter
         hasher.update(json_str.encode("utf-8"))
+
+    def _resolve_ttl_seconds(self, ttl: Optional[str]) -> int:
+        """Resolve Anthropic cache_control TTL to local checkpoint TTL."""
+        if ttl == "1h":
+            return 3600
+        if ttl == "5m" or ttl is None:
+            return 300
+        return settings.cache_timeout
 
     def _content_block_to_dict(self, content_block: ContentBlock) -> Dict:
         """
@@ -222,11 +252,10 @@ class CacheService:
     def _cleanup_expired_checkpoints(self) -> None:
         """Clean up all expired cache checkpoints."""
         current_time = datetime.now()
-        timeout_duration = timedelta(seconds=settings.cache_timeout)
         expired_checkpoints = []
 
         for checkpoint_hash, cache_checkpoint in self._checkpoints.items():
-            if (current_time - cache_checkpoint.created_at) > timeout_duration:
+            if current_time > cache_checkpoint.expires_at:
                 expired_checkpoints.append(checkpoint_hash)
 
         for checkpoint_hash in expired_checkpoints:

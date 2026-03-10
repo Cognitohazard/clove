@@ -45,6 +45,7 @@ class WebSearchResult(BaseModel):
 # Cache control
 class CacheControl(BaseModel):
     type: Literal["ephemeral"]
+    ttl: Optional[Literal["5m", "1h"]] = None
 
 
 # Content types
