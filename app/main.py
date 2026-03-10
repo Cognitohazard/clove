@@ -123,7 +123,25 @@ app.include_router(api_router)
 async def health():
     """Health check endpoint."""
     stats = await account_manager.get_status()
-    return {"status": "healthy" if stats["valid_accounts"] > 0 else "degraded"}
+    readiness = await account_manager.get_api_readiness()
+    return {
+        "status": "healthy" if readiness["messages_ready"] else "degraded",
+        "messages_ready": readiness["messages_ready"],
+        "models_ready": readiness["oauth_ready"],
+        "oauth_ready": readiness["oauth_ready"],
+        "web_ready": readiness["web_ready"],
+        "accounts": {
+            "valid": readiness["valid_accounts"],
+            "oauth": readiness["oauth_accounts"],
+            "web": readiness["web_accounts"],
+        },
+        "statistics": {
+            "valid_accounts": stats["valid_accounts"],
+            "rate_limited_accounts": stats["rate_limited_accounts"],
+            "invalid_accounts": stats["invalid_accounts"],
+            "active_sessions": stats["active_sessions"],
+        },
+    }
 
 
 # Static files (SPA fallback - must be last)

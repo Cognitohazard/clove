@@ -1,9 +1,10 @@
 from fastapi import APIRouter
-from app.api.routes import claude, accounts, settings, statistics, proxies
+from app.api.routes import claude, accounts, settings, statistics, proxies, models
 
 api_router = APIRouter()
 
 api_router.include_router(claude.router, prefix="/v1", tags=["Claude API"])
+api_router.include_router(models.router, prefix="/v1", tags=["Claude API"])
 api_router.include_router(
     accounts.router, prefix="/api/admin/accounts", tags=["Account Management"]
 )

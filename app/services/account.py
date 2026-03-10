@@ -503,6 +503,38 @@ class AccountManager:
 
         return status
 
+    async def get_api_readiness(self) -> Dict[str, int | bool]:
+        """Summarize whether the current account pool can serve API traffic."""
+        valid_accounts = [
+            account
+            for account in self._accounts.values()
+            if account.status == AccountStatus.VALID
+        ]
+        oauth_accounts = [
+            account
+            for account in valid_accounts
+            if account.auth_type in (AuthType.OAUTH_ONLY, AuthType.BOTH)
+        ]
+        web_accounts = [
+            account
+            for account in valid_accounts
+            if account.auth_type in (AuthType.COOKIE_ONLY, AuthType.BOTH)
+        ]
+        max_oauth_accounts = [account for account in oauth_accounts if account.is_max]
+        max_web_accounts = [account for account in web_accounts if account.is_max]
+
+        return {
+            "valid_accounts": len(valid_accounts),
+            "oauth_accounts": len(oauth_accounts),
+            "web_accounts": len(web_accounts),
+            "max_oauth_accounts": len(max_oauth_accounts),
+            "max_web_accounts": len(max_web_accounts),
+            "oauth_ready": bool(oauth_accounts),
+            "web_ready": bool(web_accounts),
+            "messages_ready": bool(oauth_accounts or web_accounts),
+            "max_messages_ready": bool(max_oauth_accounts or max_web_accounts),
+        }
+
     # 最小聊天测试，探测限流是否已解除
     async def _probe_rate_limit(
         self, account: Account
