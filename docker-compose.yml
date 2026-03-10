@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   clove:
-    image: ghcr.io/huan-zhaojun/clove:latest
+    image: ghcr.io/cognitohazard/clove:latest
     build:
       context: .
       dockerfile: Dockerfile

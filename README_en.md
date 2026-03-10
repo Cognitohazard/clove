@@ -27,12 +27,12 @@ docker run -d --name clove --restart unless-stopped \
   -p 5201:5201 -v ./data:/data \
   -e HOST=0.0.0.0 -e PORT=5201 -e DATA_FOLDER=/data \
   -e LOG_LEVEL=INFO -e LOG_TO_FILE=true -e LOG_FILE_PATH=/data/logs/app.log \
-  ghcr.io/<your-github-username>/clove:latest
+  ghcr.io/cognitohazard/clove:latest
 ```
 
 ### Option 2: Docker Compose
 
-Download `docker-compose.yml` from this repository, then run:
+Download `docker-compose.yml` from this repository, then run it. If you already have an older compose file from the previous fork, you can usually just replace the image name with `ghcr.io/cognitohazard/clove:latest`:
 
 ```bash
 mkdir -p clove && cd clove
