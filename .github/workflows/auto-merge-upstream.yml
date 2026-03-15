@@ -1,0 +1,68 @@
+name: Auto Merge Upstream
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # Daily at 08:00 UTC
+  workflow_dispatch:  # Manual trigger
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  merge-clove:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+
+      - name: Add upstream and attempt merge
+        id: merge
+        run: |
+          git remote add upstream https://github.com/Huan-zhaojun/clove.git
+          git fetch upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with upstream"
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git merge upstream/main --no-edit; then
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort
+            echo "updated=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sync front submodule to latest origin
+        if: steps.merge.outputs.updated != 'conflict'
+        run: |
+          cd front
+          git fetch origin master
+          LATEST=$(git rev-parse origin/master)
+          if [ "$(git rev-parse HEAD)" != "$LATEST" ]; then
+            git checkout "$LATEST"
+            cd ..
+            git add front
+            git commit -m "chore: update front submodule after upstream sync" || true
+          fi
+
+      - name: Push changes
+        if: steps.merge.outputs.updated != 'conflict'
+        run: git push origin main || true
+
+      - name: Create issue on conflict
+        if: steps.merge.outputs.updated == 'conflict'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: 'Cognitohazard',
+              repo: 'clove',
+              title: '⚠️ clove upstream merge has conflicts',
+              body: 'Automatic merge of `Huan-zhaojun/clove` into `Cognitohazard/clove` failed due to conflicts. Please merge manually.',
+              labels: ['upstream-sync']
+            });
