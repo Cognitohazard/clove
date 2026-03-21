@@ -69,6 +69,11 @@ class Account:
         self.resets_at: Optional[datetime] = None
         self.oauth_token: Optional[OAuthToken] = oauth_token
 
+        # Transient runtime fields for OAuth refresh backoff (not persisted)
+        self.refresh_fail_count: int = 0
+        self.refresh_retry_after: Optional[datetime] = None
+        self.is_refreshing: bool = False
+
     def __enter__(self) -> "Account":
         """Enter the context manager."""
         self.last_used = datetime.now()

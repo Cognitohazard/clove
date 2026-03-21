@@ -2,6 +2,7 @@ import base64
 import hashlib
 import secrets
 import time
+from enum import Enum
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 
@@ -24,6 +25,12 @@ from app.core.exceptions import (
 )
 from app.services.proxy import proxy_service
 from app.utils.retry import is_retryable_error, log_before_sleep
+
+
+class RefreshResult(Enum):
+    SUCCESS = "success"
+    TRANSIENT_ERROR = "transient_error"  # 429, 5xx, network errors
+    PERMANENT_ERROR = "permanent_error"  # 401, 403, invalid token
 
 
 class OAuthAuthenticator:
@@ -368,14 +375,18 @@ class OAuthAuthenticator:
             logger.error(f"OAuth authentication failed: {e}")
             return False
 
-    async def refresh_account_token(self, account: Account) -> bool:
+    async def refresh_account_token(self, account: Account) -> RefreshResult:
         """
         Refresh OAuth token for an account.
-        Returns True if successful, False otherwise.
+
+        Returns:
+            RefreshResult.SUCCESS: Token refreshed successfully
+            RefreshResult.PERMANENT_ERROR: Credentials invalid, token should be wiped
+            RefreshResult.TRANSIENT_ERROR: Temporary failure (429, 5xx, network), retry later
         """
         if not account.oauth_token or not account.oauth_token.refresh_token:
             logger.error("Account has no refresh token")
-            return False
+            return RefreshResult.PERMANENT_ERROR
 
         data = {
             "grant_type": "refresh_token",
@@ -395,13 +406,28 @@ class OAuthAuthenticator:
 
             if response.status_code != 200:
                 logger.error(f"Token refresh failed: {response.status_code}")
-                return None
+                if response.status_code in (429, 500, 502, 503, 504):
+                    return RefreshResult.TRANSIENT_ERROR
+                return RefreshResult.PERMANENT_ERROR
 
             token_data = await response.json()
 
+        except AppError as e:
+            if e.retryable:
+                logger.warning(
+                    f"Transient error refreshing token for {account.organization_uuid[:8]}...: {e}"
+                )
+                return RefreshResult.TRANSIENT_ERROR
+            logger.error(
+                f"Permanent error refreshing token for {account.organization_uuid[:8]}...: {e}"
+            )
+            return RefreshResult.PERMANENT_ERROR
+
         except Exception as e:
-            logger.error(f"Error refreshing token: {e}")
-            return False
+            logger.warning(
+                f"Unexpected error refreshing token for {account.organization_uuid[:8]}...: {e}"
+            )
+            return RefreshResult.TRANSIENT_ERROR
 
         account.oauth_token = OAuthToken(
             access_token=token_data["access_token"],
@@ -413,7 +439,7 @@ class OAuthAuthenticator:
         logger.info(
             f"Successfully refreshed OAuth token for account: {account.organization_uuid[:8]}..."
         )
-        return True
+        return RefreshResult.SUCCESS
 
 
 oauth_authenticator = OAuthAuthenticator()

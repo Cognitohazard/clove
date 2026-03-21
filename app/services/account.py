@@ -5,7 +5,7 @@ import tempfile
 import threading
 import uuid
 from collections import defaultdict
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 from typing import List, Optional, Dict, Set, Tuple
 
 from loguru import logger
@@ -17,7 +17,7 @@ from app.core.exceptions import (
     ClaudeRateLimitedError,
 )
 from app.core.account import Account, AccountStatus, AuthType, OAuthToken
-from app.services.oauth import oauth_authenticator
+from app.services.oauth import oauth_authenticator, RefreshResult
 
 
 class AccountManager:
@@ -411,7 +411,8 @@ class AccountManager:
 
     async def _check_and_refresh_accounts(self) -> None:
         """Check and refresh expired/expiring tokens."""
-        current_timestamp = datetime.now(UTC).timestamp()
+        current_time = datetime.now(UTC)
+        current_timestamp = current_time.timestamp()
 
         for account in self._accounts.values():
             if (
@@ -420,8 +421,24 @@ class AccountManager:
                 and account.oauth_token.refresh_token
                 and account.oauth_token.expires_at
             ):
+                # Skip if in backoff period from previous transient failure
+                if (
+                    account.refresh_retry_after
+                    and current_time < account.refresh_retry_after
+                ):
+                    continue
+
+                if account.is_refreshing:
+                    continue
+
                 if account.oauth_token.expires_at - current_timestamp < 300:
+                    account.is_refreshing = True
                     asyncio.create_task(self._refresh_account_token(account))
+
+    # Max transient refresh failures before treating as permanent
+    MAX_REFRESH_RETRIES = 3
+    # Base backoff interval (seconds), doubles each failure: 60s → 120s → 240s
+    REFRESH_BACKOFF_BASE = 60
 
     async def _refresh_account_token(self, account: Account) -> None:
         """Refresh OAuth token for an account."""
@@ -429,24 +446,54 @@ class AccountManager:
             f"Refreshing OAuth token for account: {account.organization_uuid[:8]}..."
         )
 
-        success = await oauth_authenticator.refresh_account_token(account)
-        if success:
+        try:
+            result = await oauth_authenticator.refresh_account_token(account)
+        finally:
+            account.is_refreshing = False
+
+        if result == RefreshResult.SUCCESS:
+            # Reset backoff state on success
+            account.refresh_fail_count = 0
+            account.refresh_retry_after = None
             logger.info(
                 f"Successfully refreshed OAuth token for account: {account.organization_uuid[:8]}..."
             )
-        else:
-            logger.warning(
-                f"Failed to refresh OAuth token for account: {account.organization_uuid[:8]}..."
-            )
-            if account.auth_type == AuthType.BOTH:
-                account.auth_type = AuthType.COOKIE_ONLY
-                account.oauth_token = None
-            else:
-                account.status = AccountStatus.INVALID
+            return
+
+        if result == RefreshResult.TRANSIENT_ERROR:
+            account.refresh_fail_count += 1
+
+            if account.refresh_fail_count >= self.MAX_REFRESH_RETRIES:
                 logger.error(
-                    f"Account {account.organization_uuid[:8]} is now invalid due to OAuth refresh failure"
+                    f"OAuth refresh failed {account.refresh_fail_count} times for "
+                    f"{account.organization_uuid[:8]}..., treating as permanent failure"
                 )
-            self.save_accounts()
+                # Fall through to permanent failure handling
+            else:
+                backoff_seconds = self.REFRESH_BACKOFF_BASE * (
+                    2 ** (account.refresh_fail_count - 1)
+                )
+                account.refresh_retry_after = datetime.now(UTC) + timedelta(
+                    seconds=backoff_seconds
+                )
+                logger.warning(
+                    f"Transient refresh failure {account.refresh_fail_count}/{self.MAX_REFRESH_RETRIES} "
+                    f"for {account.organization_uuid[:8]}..., retrying after {backoff_seconds}s"
+                )
+                return
+
+        # Permanent failure (or transient retries exhausted): wipe token
+        account.refresh_fail_count = 0
+        account.refresh_retry_after = None
+        if account.auth_type == AuthType.BOTH:
+            account.auth_type = AuthType.COOKIE_ONLY
+            account.oauth_token = None
+        else:
+            account.status = AccountStatus.INVALID
+            logger.error(
+                f"Account {account.organization_uuid[:8]} is now invalid due to OAuth refresh failure"
+            )
+        self.save_accounts()
 
     async def _attempt_oauth_authentication(self, account: Account) -> None:
         """Attempt OAuth authentication for an account."""
