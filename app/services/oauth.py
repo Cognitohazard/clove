@@ -138,6 +138,15 @@ class OAuthAuthenticator:
             # 其他 403 情况，抛出认证错误
             raise ClaudeAuthenticationError()
 
+        if response.status_code == 429:
+            raise ClaudeHttpError(
+                url=url,
+                status_code=429,
+                error_type="rate_limited",
+                error_message="Rate limited by upstream server",
+                retryable=False,
+            )
+
         if response.status_code >= 300:
             raise ClaudeHttpError(
                 url=url,
@@ -413,7 +422,9 @@ class OAuthAuthenticator:
             token_data = await response.json()
 
         except AppError as e:
-            if e.retryable:
+            # 429 is non-retryable (to prevent hammering) but transient for backoff purposes
+            is_transient = e.retryable or e.status_code == 429
+            if is_transient:
                 logger.warning(
                     f"Transient error refreshing token for {account.organization_uuid[:8]}...: {e}"
                 )

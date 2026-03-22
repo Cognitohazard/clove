@@ -293,13 +293,6 @@ async def delete_account(organization_uuid: str, _: AdminAuthDep):
 
 
 @router.post("/oauth/exchange", response_model=AccountResponse)
-@retry(
-    retry=retry_if_exception(is_retryable_error),
-    stop=stop_after_attempt(settings.retry_attempts),
-    wait=wait_fixed(settings.retry_interval),
-    before_sleep=log_before_sleep,
-    reraise=True,
-)
 async def exchange_oauth_code(exchange_data: OAuthCodeExchange, _: AdminAuthDep):
     """Exchange OAuth authorization code for tokens and create account."""
     # Exchange code for tokens
