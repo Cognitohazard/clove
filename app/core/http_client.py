@@ -203,13 +203,13 @@ if CURL_CFFI_AVAILABLE:
         def __init__(
             self,
             timeout: int = settings.request_timeout,
-            impersonate: str = "chrome",
+            impersonate: Optional[str] = "chrome",
             proxy: Optional[str] = settings.proxy_url,
             follow_redirects: bool = True,
         ):
             self._session = CurlAsyncSession(
                 timeout=timeout,
-                impersonate=impersonate,
+                impersonate=impersonate or None,
                 proxy=proxy,
                 allow_redirects=follow_redirects,
             )
@@ -303,7 +303,7 @@ if RNET_AVAILABLE:
         def __init__(
             self,
             timeout: int = settings.request_timeout,
-            impersonate: str = "chrome",
+            impersonate: Optional[str] = "chrome",
             proxy: Optional[str] = settings.proxy_url,
             follow_redirects: bool = True,
         ):
@@ -315,10 +315,13 @@ if RNET_AVAILABLE:
                 "edge": rnet.Emulation.Edge134,
             }
 
-            # Use Chrome as default if not found in map
-            rnet_emulation = emulation_map.get(
-                impersonate.lower(), rnet.Emulation.Chrome142
-            )
+            # Use Chrome as default; empty/None disables impersonation
+            if impersonate:
+                rnet_emulation = emulation_map.get(
+                    impersonate.lower(), rnet.Emulation.Chrome142
+                )
+            else:
+                rnet_emulation = None
 
             # Create proxy list if proxy is provided
             proxies = None
@@ -440,7 +443,7 @@ if HTTPX_AVAILABLE:
         def __init__(
             self,
             timeout: int = settings.request_timeout,
-            impersonate: str = "chrome",
+            impersonate: Optional[str] = "chrome",
             proxy: Optional[str] = settings.proxy_url,
             follow_redirects: bool = True,
         ):
@@ -529,7 +532,7 @@ if HTTPX_AVAILABLE:
 
 def create_session(
     timeout: int = settings.request_timeout,
-    impersonate: str = "chrome",
+    impersonate: Optional[str] = "chrome",
     proxy: Optional[str] = settings.proxy_url,
     follow_redirects: bool = True,
 ) -> AsyncSession:

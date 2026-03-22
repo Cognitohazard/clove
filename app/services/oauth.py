@@ -82,9 +82,13 @@ class OAuthAuthenticator:
         # Get proxy URL from proxy service
         proxy_url = await proxy_service.get_proxy(account_id=account_id, cookie=cookie)
 
+        # Only impersonate browser for claude.ai (Cloudflare-protected);
+        # console.anthropic.com is a standard API and rejects browser fingerprints
+        impersonate = "chrome" if "console.anthropic.com" not in url else None
+
         session = create_session(
             timeout=settings.request_timeout,
-            impersonate="chrome",
+            impersonate=impersonate,
             proxy=proxy_url,
             follow_redirects=False,
         )
