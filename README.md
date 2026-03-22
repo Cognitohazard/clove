@@ -1,26 +1,10 @@
-# Clove 🍀
+# Clove (Cognitohazard Fork)
 
-<div align="center">
+Fork of [Huan-zhaojun/clove](https://github.com/Huan-zhaojun/clove), which is itself a fork of [mirrorange/clove](https://github.com/mirrorange/clove).
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com)
+For base project documentation (features, limitations, API usage, configuration), see the upstream READMEs.
 
-**全力以赴的 Claude 反向代理 ✨**
-
-[English](./README_en.md) | [简体中文](#)
-
-</div>
-
-## 🌟 这是什么？
-
-Clove 是一个让你能够通过标准 Claude API 访问 Claude.ai 的反向代理工具。简单来说，它让各种 AI 应用都能连接上 Claude！
-
-**最大亮点**：Clove 是首个支持通过 OAuth 认证访问 Claude 官方 API 的反向代理（就是 Claude Code 用的那个）！这意味着你能享受到完整的 Claude API 功能，包括原生系统消息和预填充等高级特性。
-
-## 🚀 快速开始
-
-### 方式一：Docker Run
+## Quick Start
 
 ```bash
 docker run -d --name clove --restart unless-stopped \
@@ -30,191 +14,112 @@ docker run -d --name clove --restart unless-stopped \
   ghcr.io/cognitohazard/clove:latest
 ```
 
-### 方式二：Docker Compose
-
-下载本仓库里的 `docker-compose.yml` 后运行。若你之前已经在使用旧 Fork 的 compose 文件，通常只需要把镜像名替换为 `ghcr.io/cognitohazard/clove:latest`：
+Or with Docker Compose (uses `ghcr.io/cognitohazard/clove:latest`):
 
 ```bash
 mkdir -p clove && cd clove
+# download docker-compose.yml from this repo
 docker compose up -d
 ```
 
-### 开始使用
+## What This Fork Adds (vs Huan-zhaojun/clove)
 
-1. 打开浏览器访问：http://localhost:5201
-2. 使用控制台显示的临时管理密钥登录
-3. 添加你的 Claude 账户，开始使用！
+### Transparent Models Proxy
 
-> 💡 首次启动会在控制台显示随机生成的临时管理密钥，登录后记得设置自己的密钥。
+`/v1/models` and `/v1/models/{model_id}` endpoints that proxy directly to the Anthropic API through authenticated OAuth sessions. Clients can discover available models without hardcoding.
 
-## ✨ 核心功能
+**Where:** `app/api/routes/models.py`
 
-### 🔐 双模式运行
+### Claude Code Prompt Toggle
 
-- **OAuth 模式**：优先使用，可以访问 Claude API 的全部功能
-- **网页反代模式**：当 OAuth 不可用时自动切换，通过模拟 Claude.ai 网页版实现
+Configurable `inject_claude_code_system_prompt` setting (default: `true`) to control whether the legacy "You are Claude Code" system prompt is injected into API requests. Allows disabling it for non-Claude-Code clients.
 
-### 🎯 超高兼容性
+**Where:** `app/core/config.py`, `app/processors/claude_ai/claude_api_processor.py`
 
-与其他反代工具（如 Clewd）相比，Clove 的兼容性非常出色：
+### 1-Hour Cache TTL
 
-- ✅ 完全支持 SillyTavern
-- ✅ 支持绝大部分使用 Claude API 的应用
-- ✅ 甚至支持 Claude Code 本身！
+Cache service recognizes `1h` as a TTL value (resolves to 3600 seconds), in addition to existing TTL options.
 
-### 🛠️ 功能增强
+**Where:** `app/services/cache.py`
 
-#### 对于 OAuth 模式
+### OAuth Resilience Fixes
 
-- 完全访问 Claude API 的全部功能
-- 支持原生系统消息
-- 支持预填充功能
-- 性能更好，更稳定
+Three fixes to prevent OAuth token loss and unnecessary retries:
 
-#### 对于 Claude.ai 网页反代模式
+- **Transient refresh failure protection:** Exponential backoff (60s/120s/240s, max 3 retries) before treating a refresh failure as permanent. Prevents transient network errors from wiping valid tokens. (`app/services/oauth.py`)
+- **429 retry guard:** Stops aggressive retry stacking on OAuth token endpoint 429 responses. (`app/services/oauth.py`)
+- **Browser impersonation skip:** Disables TLS fingerprinting (`impersonate="chrome"`) for `console.anthropic.com` OAuth endpoints to avoid triggering rate limits. (`app/services/oauth.py`)
 
-Clove 处理了 Claude.ai 网页版与 API 的各种差异：
+### CI/CD & Infrastructure
 
-- 图片上传支持
-- 扩展思考（思维链）支持
+- **Auto-merge upstream workflow:** Daily (08:00 UTC) automatic merge from Huan-zhaojun/clove, with frontend submodule sync and conflict issue creation on failure. (`.github/workflows/auto-merge-upstream.yml`)
+- **Fork GHCR image:** Docker image published to `ghcr.io/cognitohazard/clove` instead of upstream's registry.
+- **Frontend submodule repointed** to `Cognitohazard/clove-front`.
+- **PyPI publish workflow removed** (this fork is Docker-only).
 
-即使是通过网页反代，Clove 也能让你使用原本不支持的功能：
+## What Huan-zhaojun/clove Adds (vs mirrorange/clove)
 
-- 工具调用（Function Calling）
-- 停止序列（Stop Sequences）
-- Token 计数（估算值）
-- 非流式传输
+### Dynamic Proxy Pool
 
-Clove 尽可能让 Claude.ai 网页反代更接近 API，以期在所有应用程序中获得无缝体验。
+Full proxy management system with three modes (disabled/fixed/dynamic) and four rotation strategies (sequential/random/round-robin/least-connections). Includes health checking and automatic failover.
 
-### 🎨 友好的管理界面
+**Where:** `app/services/proxy.py` (796 lines, entirely new), `app/models/proxy.py`, `app/api/routes/proxies.py`
 
-- 现代化的 Web 管理界面
-- 无需编辑配置文件
-- 所有设置都能在管理页面上完成
-- 自动管理用户配额和状态
+### Multi-Account Management Enhancements
 
-### 🔄 智能功能
+- Search, filter, sort, and paginate the account list
+- Batch operations (add cookies, delete, refresh status)
+- Account status refresh with credential validation and rate-limit probing
+- Dashboard account count card with status breakdown
+- Concurrent cookie processing for bulk adds
 
-- **自动 OAuth 认证**：通过 Cookie 自动完成，无需手动登录 Claude Code
-- **智能切换**：自动在 OAuth 和 Claude.ai 网页反代之间切换
-- **配额管理**：超出配额时自动标记并在重置时恢复
+**Where:** `app/services/account.py` (+414 lines), `app/api/routes/accounts.py`
 
-## ⚠️ 局限性
+### Web Search Support
 
-### 1. Android Termux 用户注意
+Native web search support through the Claude Web link, enabling search-augmented responses via the web proxy path.
 
-Clove 依赖 `curl_cffi` 来请求 claude.ai，但这个依赖无法在 Termux 上运行。
+**Where:** `app/processors/claude_ai/claude_web_processor.py`
 
-**解决方案**：
+### Extended Thinking for Free Accounts
 
-- 使用不含 curl_cffi 的版本：`pip install clove-proxy`
-  - ✅ 通过 OAuth 访问 Claude API（需要在管理页面手动完成认证）
-  - ❌ 无法使用网页反代功能
-  - ❌ 无法自动完成 OAuth 认证
-- 使用反向代理/镜像（如 fuclaude）
-  - ✅ 可以使用全部功能
-  - ❌ 需要额外的服务器（既然有搭建镜像的服务器，为什么要在 Termux 上部署呢 www）
+Removed the `is_pro` gate so Free-tier accounts can use extended thinking (chain-of-thought).
 
-### 2. 工具调用限制
+**Where:** `app/processors/claude_ai/claude_api_processor.py`
 
-如果你使用网页反代模式，避免接入会**大量并行执行工具调用**的应用。
+### Claude API Spec Alignment
 
-- Clove 需要保持与 Claude.ai 的连接等待工具调用结果
-- 过多并行调用会耗尽连接导致失败
-- OAuth 模式不受此限制
+Updated thinking/effort/beta headers to match the latest Claude API specification.
 
-### 3. 提示结构限制
+**Where:** `app/processors/claude_ai/claude_api_processor.py`
 
-当 Clove 使用网页反代时，Claude.ai 会在提示中添加额外的系统提示词和文件上传结构。当使用对结构要求高的提示词（如 RP 预设）时：
+### Trivy CI Fix
 
-- 你可以预估请求将通过何种方式进行。在默认配置下：
-  - 使用 Free 账户时，所有请求通过 Claude.ai 网页反代
-  - 使用 Pro 账户时，Sonnet 模型通过 Claude API，Opus 模型通过 Claude.ai 网页反代
-  - 使用 Max 账户时，所有请求通过 Claude API 进行
-  - 若存在多账户，Clove 始终优先使用可访问该模型 API 的账户
-- 请选择与请求方式兼容的提示词
+Cached Trivy DB with multi-source fallback (ECR Public / ghcr.io) to avoid intermittent `mirror.gcr.io` 404 failures.
 
-## 🔧 高级配置
+**Where:** `.github/workflows/docker-publish.yml`
 
-### 环境变量
+### Web Proxy Robustness
 
-虽然大部分配置都能在管理界面完成，但你也可以通过环境变量进行设置：
+- Image uploads use per-conversation wiggle endpoints; upload failures abort immediately
+- File count over-limit is caught client-side before sending
+- `invalid_request_error` responses are not retried
+- Pure-image requests (no text) are supported
+- Removed hardcoded system prompt injection that caused 400 errors
 
-```bash
-# 端口配置
-PORT=5201
+### Docker & Build
 
-# 管理密钥（不设置则自动生成）
-ADMIN_API_KEYS==your-secret-key
+- Migrated from pip to uv in Dockerfile
+- Added Asia/Shanghai timezone config
+- Enabled local `docker compose up --build` alongside remote image pull
 
-# Claude.ai Cookie
-COOKIES=sessionKey=your-session-key
-```
+### Other
 
-更多配置请见 `.env.example` 文件。
+- Cookie validation compatible with `sk-ant-sid02` and later formats
+- `refusal` and `pause_turn` stop reasons handled in streaming
+- i18n locale updates
+- CLAUDE.md, AGENTS.md, and extensive documentation (`docs/`)
 
-### API 使用
+## License
 
-配置完成后，你可以像使用标准 Claude API 一样使用 Clove：
-
-```python
-import anthropic
-
-client = anthropic.Anthropic(
-    base_url="http://localhost:5201",
-    api_key="your-api-key"  # 在管理界面创建
-)
-
-response = client.messages.create(
-    model="claude-opus-4-20250514",
-    messages=[{"role": "user", "content": "Hello, Claude!"}],
-    max_tokens=1024,
-)
-```
-
-## 🤝 贡献
-
-欢迎贡献代码！如果你有好的想法或发现了问题：
-
-1. Fork 这个项目
-2. 创建你的功能分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交你的修改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开一个 Pull Request
-
-## 📄 许可证
-
-本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
-
-## 🙏 致谢
-
-- [Anthropic Claude](https://www.anthropic.com/claude) - ~~可爱的小克~~ 强大的 AI 助手
-- [Clewd](https://github.com/teralomaniac/clewd/) - 初代 Claude.ai 反向代理
-- [ClewdR](https://github.com/Xerxes-2/clewdr) - 高性能 Claude.ai 反向代理
-- [FastAPI](https://fastapi.tiangolo.com/) - 现代、快速的 Web 框架
-- [Tailwind CSS](https://tailwindcss.com/) - CSS 框架
-- [Shadcn UI](https://ui.shadcn.com/) - 现代化的 UI 组件库
-- [Vite](https://vitejs.dev/) - 现代化的前端构建工具
-- [React](https://reactjs.org/) - JavaScript 库
-
-## ⚠️ 免责声明
-
-本项目仅供学习和研究使用。使用本项目时，请遵守相关服务的使用条款。作者不对任何滥用或违反服务条款的行为负责。
-
-## 📮 联系方式
-
-如有问题或建议，欢迎通过以下方式联系：
-
-- 提交 [Issue](issues)
-- 发送 Pull Request
-
-## 🌸 关于 Clove
-
-丁香，桃金娘科蒲桃属植物，是一种常见的香料，也可用作中药。丁香（Clove）与丁香花（Syringa）是两种不同的植物哦~在本项目中，Clove 更接近 Claude 和 love 的合成词呢！
-
----
-
-<div align="center">
-Made with Clove
-</div>
+MIT - see [LICENSE](LICENSE).
