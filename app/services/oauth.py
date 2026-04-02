@@ -8,7 +8,7 @@ from urllib.parse import urlparse, parse_qs
 
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_fixed
 
-from app.core.http_client import Response, create_session, ProxyNetworkException
+from app.core.http_client import Response, create_session, create_plain_session, ProxyNetworkException
 from loguru import logger
 
 from app.core.config import settings
@@ -79,16 +79,13 @@ class OAuthAuthenticator:
         cookie: Optional[str] = None,
         **kwargs,
     ) -> Response:
+        """Browser-impersonating request — for claude.ai endpoints (Cloudflare)."""
         # Get proxy URL from proxy service
         proxy_url = await proxy_service.get_proxy(account_id=account_id, cookie=cookie)
 
-        # Only impersonate browser for claude.ai (Cloudflare-protected);
-        # console.anthropic.com is a standard API and rejects browser fingerprints
-        impersonate = "chrome" if "console.anthropic.com" not in url else None
-
         session = create_session(
             timeout=settings.request_timeout,
-            impersonate=impersonate,
+            impersonate="chrome",
             proxy=proxy_url,
             follow_redirects=False,
         )
@@ -157,6 +154,63 @@ class OAuthAuthenticator:
                 status_code=response.status_code,
                 error_type="Unknown",
                 error_message="Error occurred during request to Claude.ai",
+            )
+
+        return response
+
+    async def _token_request(
+        self,
+        url: str,
+        data: Dict,
+        account_id: Optional[str] = None,
+    ) -> Response:
+        """Plain HTTP request for OAuth token endpoints (console.anthropic.com).
+
+        Uses a non-impersonating HTTP client with form-encoded data and
+        claude-cli User-Agent, matching the real Claude CLI behavior.
+        """
+        proxy_url = await proxy_service.get_proxy(account_id=account_id)
+
+        session = create_plain_session(
+            timeout=settings.request_timeout,
+            proxy=proxy_url,
+            follow_redirects=False,
+        )
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "claude-cli/2.1.81 (external, cli)",
+        }
+        async with session:
+            try:
+                response: Response = await session.request(
+                    method="POST", url=url, headers=headers, data=data,
+                )
+            except ProxyNetworkException as e:
+                if proxy_url:
+                    await proxy_service.mark_unhealthy(
+                        proxy_url,
+                        reason=f"connection error: {type(e).__name__}"
+                    )
+                raise ProxyConnectionError(
+                    proxy_url=proxy_url,
+                    error_type=type(e).__name__,
+                )
+
+        if response.status_code == 429:
+            raise ClaudeHttpError(
+                url=url,
+                status_code=429,
+                error_type="rate_limited",
+                error_message="Rate limited by upstream server",
+                retryable=False,
+            )
+
+        if response.status_code >= 400:
+            raise ClaudeHttpError(
+                url=url,
+                status_code=response.status_code,
+                error_type="token_error",
+                error_message="OAuth token request failed",
             )
 
         return response
@@ -294,12 +348,7 @@ class OAuthAuthenticator:
             data["state"] = state
 
         try:
-            response = await self._request(
-                "POST",
-                settings.oauth_token_url,
-                json=data,
-                headers={"Content-Type": "application/json"},
-            )
+            response = await self._token_request(settings.oauth_token_url, data=data)
 
             token_data = await response.json()
 
@@ -329,17 +378,7 @@ class OAuthAuthenticator:
         }
 
         try:
-            response = await self._request(
-                "POST",
-                settings.oauth_token_url,
-                json=data,
-                headers={"Content-Type": "application/json"},
-            )
-
-            if response.status_code != 200:
-                logger.error(f"Token refresh failed: {response.status_code}")
-                return None
-
+            response = await self._token_request(settings.oauth_token_url, data=data)
             token_data = await response.json()
             return token_data
 
@@ -408,21 +447,11 @@ class OAuthAuthenticator:
         }
 
         try:
-            # Use _request directly with account_id for proxy consistency
-            response = await self._request(
-                "POST",
+            response = await self._token_request(
                 settings.oauth_token_url,
+                data=data,
                 account_id=account.organization_uuid,
-                json=data,
-                headers={"Content-Type": "application/json"},
             )
-
-            if response.status_code != 200:
-                logger.error(f"Token refresh failed: {response.status_code}")
-                if response.status_code in (429, 500, 502, 503, 504):
-                    return RefreshResult.TRANSIENT_ERROR
-                return RefreshResult.PERMANENT_ERROR
-
             token_data = await response.json()
 
         except AppError as e:
