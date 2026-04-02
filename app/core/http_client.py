@@ -566,6 +566,41 @@ def create_session(
         )
 
 
+def create_plain_session(
+    timeout: int = settings.request_timeout,
+    proxy: Optional[str] = settings.proxy_url,
+    follow_redirects: bool = True,
+) -> AsyncSession:
+    """Create a plain HTTP session WITHOUT browser fingerprinting/impersonation.
+
+    Used for standard API endpoints (e.g. console.anthropic.com OAuth token exchange)
+    that reject browser-like TLS fingerprints.
+
+    Intentionally prefers httpx first (reversed from create_session's rnet-first order)
+    because httpx produces zero TLS/header fingerprint artifacts.
+    """
+    if HTTPX_AVAILABLE:
+        return HttpxAsyncSession(
+            timeout=timeout,
+            proxy=proxy,
+            follow_redirects=follow_redirects,
+        )
+    elif CURL_CFFI_AVAILABLE:
+        return CurlAsyncSessionWrapper(
+            timeout=timeout,
+            impersonate=None,
+            proxy=proxy,
+            follow_redirects=follow_redirects,
+        )
+    else:
+        return RnetAsyncSession(
+            timeout=timeout,
+            impersonate=None,
+            proxy=proxy,
+            follow_redirects=follow_redirects,
+        )
+
+
 async def download_image(url: str, timeout: int = 30) -> Tuple[bytes, str]:
     """Download an image from a URL and return content and content type.
 

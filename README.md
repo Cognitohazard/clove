@@ -48,7 +48,7 @@ Three fixes to prevent OAuth token loss and unnecessary retries:
 
 - **Transient refresh failure protection:** Exponential backoff (60s/120s/240s, max 3 retries) before treating a refresh failure as permanent. Prevents transient network errors from wiping valid tokens. (`app/services/oauth.py`)
 - **429 retry guard:** Stops aggressive retry stacking on OAuth token endpoint 429 responses. (`app/services/oauth.py`)
-- **Browser impersonation skip:** Disables TLS fingerprinting (`impersonate="chrome"`) for `console.anthropic.com` OAuth endpoints to avoid triggering rate limits. (`app/services/oauth.py`)
+- **Plain HTTP client for token exchange:** Dedicated `create_plain_session()` and `_token_request()` that use a non-impersonating HTTP client (prefers httpx) with form-encoded data and `claude-cli` User-Agent for `console.anthropic.com` OAuth endpoints. Prevents 429s caused by browser TLS fingerprints. Based on upstream mirrorange/clove@156efcd. (`app/core/http_client.py`, `app/services/oauth.py`)
 
 ### CI/CD & Infrastructure
 
