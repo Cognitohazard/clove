@@ -95,7 +95,9 @@ Removed the `is_pro` gate so Free-tier accounts can use extended thinking (chain
 
 ### Transparent OAuth Proxy Passthrough
 
-OAuth mode now forwards the raw request body directly to the Claude API instead of round-tripping through Pydantic serialization. Prevents silent field loss (e.g., `CacheControl.scope`). All Pydantic models default to `extra="allow"` via a project base class so unknown API fields pass through the proxy transparently.
+OAuth mode now forces transparent passthrough for Messages API requests: the processor forwards the original raw request body to Anthropic instead of rebuilding it from Pydantic models. This fixes cache-scope requests from upstream because fields such as `cache_control.scope` are preserved exactly, even though the local cache model only needs to inspect `type` and `ttl`.
+
+The upstream round-trip happens on the OAuth path: FastAPI parses the request into `MessagesAPIRequest`, then `ClaudeAPIProcessor` sends `context.messages_api_request.model_dump_json(exclude_none=True)`. Because upstream `CacheControl` does not allow extra fields, `scope` can be dropped during parsing/serialization before the request reaches Anthropic. This fork avoids that path by forwarding the raw body, and Pydantic models also inherit a project `BaseModel` with `extra="allow"` so parsed API data keeps unknown fields where local processing still needs models.
 
 **Where:** `app/models/claude.py` (BaseModel), `app/processors/claude_ai/claude_api_processor.py`
 
