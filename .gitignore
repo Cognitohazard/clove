@@ -215,6 +215,7 @@ app/static/
 
 # Claude Code
 .claude/
+.codex
 
 tmp/
 temp/
