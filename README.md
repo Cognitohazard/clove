@@ -87,11 +87,17 @@ Removed the `is_pro` gate so Free-tier accounts can use extended thinking (chain
 
 **Where:** `app/processors/claude_ai/claude_api_processor.py`
 
+### Transparent OAuth Proxy Passthrough
+
+OAuth mode now forwards the raw request body directly to the Claude API instead of round-tripping through Pydantic serialization. Prevents silent field loss (e.g., `CacheControl.scope`). All Pydantic models default to `extra="allow"` via a project base class so unknown API fields pass through the proxy transparently.
+
+**Where:** `app/models/claude.py` (BaseModel), `app/processors/claude_ai/claude_api_processor.py`
+
 ### Claude API Spec Alignment
 
-Updated thinking/effort/beta headers to match the latest Claude API specification.
+Updated thinking/effort/beta headers and stop reasons to match the latest Claude API specification. Adds `model_context_window_exceeded` stop reason (Claude 4.6), explicit `Tool.type` field for server tools, and updated default model to `claude-sonnet-4-6`.
 
-**Where:** `app/processors/claude_ai/claude_api_processor.py`
+**Where:** `app/models/claude.py`, `app/models/streaming.py`, `app/processors/claude_ai/claude_api_processor.py`
 
 ### Trivy CI Fix
 
