@@ -1,165 +1,280 @@
 # 项目概述
 
-Clove 是一个 Claude.ai 反向代理，通过 Claude.ai 账户提供标准 Claude API 访问。支持两种模式：
-- **OAuth 模式**：通过 OAuth 认证完整访问 Claude API（类似 Claude Code 使用的方式）
-- **网页代理模式**：模拟 Claude.ai 网页界面的回退方案
+Clove 是一个 Claude.ai 反向代理，本仓库是 `Cognitohazard/clove` 二开 Fork。它通过 Claude.ai 账户提供 Anthropic Claude Messages API 兼容访问，并附带一个前端管理界面。
+
+上游关系：
+
+- `Cognitohazard/clove` fork 自 `Huan-zhaojun/clove`
+- `Huan-zhaojun/clove` fork 自 `mirrorange/clove`
+- 本 Fork 主要面向 Docker/GHCR 部署，镜像为 `ghcr.io/cognitohazard/clove:latest`
+
+支持两条 Claude 链路：
+
+- **OAuth API 链路**：优先使用 OAuth token 直接访问 `https://api.anthropic.com/v1/messages`
+- **Claude.ai Web 链路**：通过 Claude.ai 网页会话作为回退，支持图片上传、扩展思考、Web Search 映射等网页端能力
 
 # 开发启动
 
-## 前后端分离开发（推荐）
+## 后端开发
 
 ```bash
-# 终端 1：启动后端（端口 5201）
-python -m app.main
+# 推荐先同步依赖
+uv sync --extra rnet --extra dev
 
-# 终端 2：启动前端（端口 5173，热重载）
+# 启动后端，默认端口 5201
+uv run python -m app.main
+
+# 或使用项目入口命令
+uv run clove
+```
+
+访问：
+
+- 后端 API: `http://localhost:5201`
+- 健康检查: `http://localhost:5201/health`
+
+## 前后端分离开发
+
+```bash
+# 终端 1：后端
+uv run python -m app.main
+
+# 终端 2：前端
 cd front
-pnpm install  # 首次需要
+pnpm install
 pnpm dev
-
-# 访问 http://localhost:5173（前端会自动代理 API 到后端）
 ```
 
-## 仅后端开发
+访问 `http://localhost:5173`。Vite 会把 `/api` 和 `/health` 代理到 `http://localhost:5201`。
+
+## Docker 本地运行
 
 ```bash
-python -m app.main
-# 访问 http://localhost:5201（无前端界面）
+docker compose up --build
 ```
 
-# 其他命令
+`docker-compose.yml` 默认：
+
+- 暴露 `5201:5201`
+- 挂载 `./data:/data`
+- 设置 `DATA_FOLDER=/data`
+- 使用 `ghcr.io/cognitohazard/clove:latest`
+
+# 常用命令
 
 ```bash
-# 代码检查
-ruff check app/
-ruff format app/
+# 代码检查与格式化
+uv run ruff check app/
+uv run ruff format app/
 
-# 构建 wheel 包（需要先构建前端）
-python scripts/build_wheel.py
+# 前端检查与构建
+cd front
+pnpm lint
+pnpm build
 
-# 安装为可编辑包（需要先构建前端到 app/static/）
-pip install -e ".[rnet,dev]"
+# 构建前端并打 wheel
+uv run python scripts/build_wheel.py
+
+# 仅构建 wheel，跳过前端
+uv run python scripts/build_wheel.py --skip-frontend
+
+# Makefile 等价入口
+make run
+make build
+make build-frontend
+make build-wheel
+make clean
 ```
 
 # 依赖管理
 
-项目使用 **uv** 管理依赖，采用可选依赖设计：
+项目使用 **uv** 管理 Python 依赖，锁文件为 `uv.lock`，需要提交。
 
 | 依赖组 | 用途 |
 |--------|------|
-| 核心 | FastAPI, Pydantic 等基础依赖 |
-| `rnet` | rnet HTTP 客户端（推荐） |
-| `curl` | curl-cffi HTTP 客户端（备选） |
-| `dev` | 开发工具（ruff, build） |
+| 核心 | FastAPI, Pydantic, httpx, tiktoken, uvicorn 等 |
+| `rnet` | rnet HTTP 客户端，推荐链路 |
+| `curl` | curl-cffi HTTP 客户端，备选链路 |
+| `dev` | ruff, build 等开发工具 |
 
-## 常用命令
+常用命令：
 
 ```bash
-# 锁文件管理
-uv lock              # 根据 pyproject.toml 更新 uv.lock
-uv lock --check      # 检查锁文件是否同步（CI/提交前）
-
-# 安装依赖
-uv sync              # 只装核心依赖
-uv sync --extra rnet # 核心 + rnet
-uv sync --all-extras # 安装全部依赖
+uv lock
+uv lock --check
+uv sync
+uv sync --extra rnet
+uv sync --all-extras
 ```
 
-## 工作流
+Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv sync --locked --no-dev --extra rnet --extra curl` 安装运行依赖。
 
-```
-pyproject.toml ──uv lock──> uv.lock ──uv sync──> .venv/
-   (配置)                    (锁定)              (安装)
-```
-
-- `uv.lock` 需提交到 git，保证团队环境一致
-- 本地 `--extra` 选项不影响锁文件
-
-# 架构
+# 后端架构
 
 ## 请求处理流程
 
-```
-客户端请求 → /v1/messages
-       ↓
-   ClaudeAIPipeline (app/processors/claude_ai/pipeline.py)
-       ↓
-   [处理器链 - 按顺序执行]
-       ↓
-   响应流 → 客户端
+```text
+客户端请求
+  -> POST /v1/messages
+  -> ClaudeAIPipeline (app/processors/claude_ai/pipeline.py)
+  -> 处理器链
+  -> OAuth API 响应或 Web 链路 SSE 转换响应
 ```
 
 ## 处理器管道
 
-请求处理采用管道模式，处理器位于 `app/processors/claude_ai/`：
+请求处理采用管道模式，处理器顺序定义在 `app/processors/claude_ai/pipeline.py`：
 
 1. `TestMessageProcessor` - 处理 SillyTavern 测试消息
 2. `ToolResultProcessor` - 处理工具调用结果
-3. `ClaudeAPIProcessor` - OAuth API 请求（优先）
-4. `ClaudeWebProcessor` - 网页接口回退
-5. `EventParsingProcessor` - 解析 SSE 事件
+3. `ClaudeAPIProcessor` - OAuth API 链路，优先直接代理到 Anthropic API
+4. `ClaudeWebProcessor` - Claude.ai Web 链路回退
+5. `EventParsingProcessor` - 解析 Claude.ai SSE 事件
 6. `ModelInjectorProcessor` - 注入模型信息
 7. `StopSequencesProcessor` - 处理停止序列
-8. `ToolCallEventProcessor` - 处理工具调用
+8. `ToolCallEventProcessor` - 处理工具调用事件
 9. `MessageCollectorProcessor` - 收集消息内容
-10. `TokenCounterProcessor` - 估算 Token 用量
-11. `StreamingResponseProcessor` - 格式化流式输出
-12. `NonStreamingResponseProcessor` - 格式化非流式输出
+10. `TokenCounterProcessor` - 估算 token 用量
+11. `StreamingResponseProcessor` - 格式化流式响应
+12. `NonStreamingResponseProcessor` - 格式化非流式响应
 
-## 核心服务（单例）
+`ClaudeAIContext` 在管道中传递请求、会话、原始流、响应和元数据。
+
+## OAuth API 链路要点
+
+核心文件：`app/processors/claude_ai/claude_api_processor.py`
+
+- OAuth 链路优先执行，成功后设置 `context.metadata["stop_pipeline"] = True`
+- 直接使用原始 request body 转发，避免 Pydantic round-trip 丢失未知字段
+- `BaseModel` 默认 `extra="allow"`，新 Anthropic 字段应尽量透明透传
+- 默认会注入 legacy Claude Code system prompt，可通过 `INJECT_CLAUDE_CODE_SYSTEM_PROMPT=false` 关闭
+- `anthropic-beta` 会合并内部 `oauth-2025-04-20` 与客户端传入值
+- `invalid_request_error` 被视为不可重试错误
+- 403 空响应会把当前代理标记为 unhealthy
+
+## Claude.ai Web 链路要点
+
+核心文件：`app/processors/claude_ai/claude_web_processor.py`
+
+- 用于 OAuth API 不可用时的回退
+- 图片上传走会话级 wiggle/upload 端点，上传失败会中止请求
+- 单次 Web 请求最多 20 个文件，超限会提前报错
+- 支持纯图片请求
+- `web_search_*` server tool 会映射为 Claude.ai Web 端 `web_search_v0`
+- `thinking.enabled` 或 `thinking.adaptive` 会启用网页端 extended/paprika 模式
+
+# 核心服务
 
 | 服务 | 文件 | 用途 |
 |------|------|------|
-| `account_manager` | `app/services/account.py` | 账户生命周期、负载均衡、OAuth Token 刷新 |
-| `session_manager` | `app/services/session.py` | Claude.ai 会话管理 |
+| `account_manager` | `app/services/account.py` | 账户生命周期、负载均衡、状态恢复、OAuth token 刷新 |
+| `session_manager` | `app/services/session.py` | Claude.ai Web 会话管理 |
 | `tool_call_manager` | `app/services/tool_call.py` | 待处理工具调用追踪 |
-| `cache_service` | `app/services/cache.py` | 响应缓存 |
-| `oauth_authenticator` | `app/services/oauth.py` | OAuth 流程处理 |
-| `proxy_service` | `app/services/proxy.py` | 动态代理池管理（轮换、健康检查） |
-| `i18n_service` | `app/services/i18n.py` | 国际化翻译管理（en/zh） |
+| `cache_service` | `app/services/cache.py` | 响应缓存与 checkpoint/account 绑定 |
+| `oauth_authenticator` | `app/services/oauth.py` | OAuth 认证、token exchange、refresh |
+| `proxy_service` | `app/services/proxy.py` | 固定代理和动态代理池，轮换、冷却、健康状态 |
+| `i18n_service` | `app/services/i18n.py` | 国际化翻译管理 |
 | `event_processing` | `app/services/event_processing/` | SSE 事件解析与序列化 |
 
-> 多账户管理增强（搜索/筛选/排序/分页/批量操作/状态刷新）详见 `docs/account-management-enhance.md`
+账户模型支持 `cookie_only`、`oauth_only`、`both` 三种认证类型。OAuth refresh 对临时失败有退避保护，达到最大重试次数后才会降级或标记账号失效。
 
-## API 路由
+# API 路由
 
-- `/v1/messages` - Claude API 兼容端点
-- `/v1/models` - 模型列表（透明代理）
-- `/v1/models/{model_id}` - 模型详情（透明代理）
-- `/api/admin/accounts` - 账户管理
-- `/api/admin/accounts/oauth/exchange` - OAuth 授权码交换
-- `/api/admin/accounts/batch/refresh` - 批量刷新账户状态
-- `/api/admin/accounts/batch/delete` - 批量删除账户
-- `/api/admin/accounts/{uuid}/refresh` - 单账户状态刷新
-- `/api/admin/settings` - 配置管理
-- `/api/admin/proxies` - 代理列表管理
-- `/api/admin/statistics` - 使用统计
-- `/health` - 健康检查
+路由挂载在 `app/api/main.py`：
 
-## 配置
+| 路径 | 文件 | 说明 |
+|------|------|------|
+| `POST /v1/messages` | `app/api/routes/claude.py` | Claude Messages API 兼容入口 |
+| `GET /v1/models` | `app/api/routes/models.py` | 通过 OAuth 账户透明代理 Anthropic models 列表 |
+| `GET /v1/models/{model_id}` | `app/api/routes/models.py` | 通过 OAuth 账户透明代理模型详情 |
+| `/api/admin/accounts` | `app/api/routes/accounts.py` | 账户增删改查 |
+| `/api/admin/accounts/oauth/exchange` | `app/api/routes/accounts.py` | OAuth 授权码交换 |
+| `/api/admin/accounts/batch/refresh` | `app/api/routes/accounts.py` | 批量刷新账户状态 |
+| `/api/admin/accounts/batch/delete` | `app/api/routes/accounts.py` | 批量删除账户 |
+| `/api/admin/settings` | `app/api/routes/settings.py` | 运行时配置读取与保存 |
+| `/api/admin/proxies` | `app/api/routes/proxies.py` | 动态代理列表读写 |
+| `/api/admin/proxies/status` | `app/api/routes/proxies.py` | 代理池状态 |
+| `/api/admin/statistics` | `app/api/routes/statistics.py` | 账户统计 |
+| `GET /health` | `app/main.py` | 健康检查和 readiness |
 
-配置优先级（从高到低）：
-1. JSON 配置文件（`~/.clove/data/config.json`）
-2. 环境变量
-3. `.env` 文件
-4. 默认值
+认证规则：
 
-核心配置在 `app/core/config.py`，完整选项见 `.env.example`。
+- `/v1/*` 使用 `API_KEYS` 或 `ADMIN_API_KEYS`
+- `accounts`、`settings`、`statistics` 路由使用 `ADMIN_API_KEYS`
+- `proxies` 路由当前没有声明 `AdminAuthDep`，改动认证行为前先核对前后端影响
+- 未配置 `ADMIN_API_KEYS` 时会生成临时 admin key，只打印到启动日志，不会持久化
 
-## 数据存储
+# 配置与数据
 
-默认位置：`~/.clove/data/`
-- `accounts.json` - 账户凭证和 OAuth Token
-- `config.json` - 运行时配置
-- `proxies.txt` - 动态代理列表（每行一个代理）
+配置优先级从高到低：
+
+1. 初始化参数
+2. JSON 配置文件：`DATA_FOLDER/config.json`
+3. 环境变量
+4. `.env`
+5. 默认值
+
+默认数据目录为 `~/.clove/data/`，Docker 中通常为 `/data`。
+
+数据文件：
+
+- `accounts.json` - 账户、cookie、OAuth token、状态
+- `config.json` - 管理端保存的运行时配置
+- `proxies.txt` - 动态代理池列表，每行一个代理
+
+重要配置：
+
+- `HOST`, `PORT`, `DATA_FOLDER`
+- `API_KEYS`, `ADMIN_API_KEYS`
+- `COOKIES`
+- `CLAUDE_AI_URL`, `CLAUDE_API_BASEURL`
+- `INJECT_CLAUDE_CODE_SYSTEM_PROMPT`
+- `PROXY_URL` 旧固定代理配置，启动时会迁移到新 `proxy` 配置
+- `NO_FILESYSTEM_MODE` 会禁用文件读写，账户和配置只保存在内存中
+- `MAX_MODELS` 默认包含 `claude-opus-4-6`，用于选择 Max 账户
+
+# 动态代理
+
+代理配置模型在 `app/models/proxy.py`，服务实现在 `app/services/proxy.py`。
+
+模式：
+
+- `disabled` - 不使用代理
+- `fixed` - 单固定代理
+- `dynamic` - 从 `proxies.txt` 加载代理池
+
+轮换策略：
+
+- `sequential`
+- `random`
+- `random_no_repeat`
+- `per_account`
+
+代理发生连接错误、403 空响应等情况时会进入 cooldown，`proxy_service` 会在可用代理间切换。
 
 # 前端子模块
 
-前端位于 `front/` 子模块 → 独立仓库 `clove-front`（React 19 + Vite 7 + Tailwind CSS 4）
+前端位于 `front/`，是独立子模块，当前指向 `Cognitohazard/clove-front`。技术栈：
 
-详细文档见 `front/CLAUDE.md`
+- React 19
+- TypeScript
+- Vite 7
+- Tailwind CSS 4
+- Radix UI
+- Axios
 
-## 构建部署
+主要入口：
+
+- `front/src/api/client.ts` - API 封装和 admin key 注入
+- `front/src/api/types.ts` - 前端接口类型
+- `front/src/pages/Accounts.tsx` - 账户管理
+- `front/src/pages/Dashboard.tsx` - 仪表盘
+- `front/src/pages/Settings.tsx` - 设置页
+- `front/src/components/DynamicProxySettings.tsx` - 动态代理配置
+
+更多前端说明见 `front/CLAUDE.md`。
+
+构建部署：
 
 ```bash
 cd front
@@ -168,55 +283,49 @@ pnpm build
 cp -r dist/* ../app/static/
 ```
 
-# 关键模式
+`scripts/build_wheel.py` 会自动构建前端并复制到 `app/static/`，除非传入 `--skip-frontend`。
 
-- **全异步**：所有 I/O 操作使用 `async/await`
-- **Pydantic 模型**：请求/响应验证在 `app/models/`
-- **Loguru 日志**：使用 `from loguru import logger`
-- **Context 模式**：`ClaudeAIContext` 在管道中传递请求状态
+# 关键开发模式
 
-# 合并上游（upstream）注意事项
+- 全异步 I/O，服务和处理器使用 `async/await`
+- Pydantic v2 模型在 `app/models/`
+- 项目 Claude API 模型默认 `extra="allow"`，不要轻易改回 forbid
+- HTTP 客户端统一走 `app/core/http_client.py`
+- OAuth token exchange 使用 plain session，避免浏览器 TLS 指纹导致 429
+- 日志使用 Loguru：`from loguru import logger`
+- 异常类型集中在 `app/core/exceptions.py`，FastAPI handler 在 `app/core/error_handler.py`
+- 静态资源和 SPA fallback 在 `app/core/static.py`，必须晚于 API 和 `/health` 注册
 
-本项目是二开 Fork，既向上游贡献 PR，也有独有的定制开发。
+# 合并上游注意事项
 
-## 已知风险
+本仓库既保留本地定制，也会合并上游改动。上游 PR 被合并后，同一逻辑可能在本地和上游以不同 SHA 出现，自动合并可能保留两份实现。
 
-PR 被上游合并后，同一份改动在本地和上游各存一份（SHA 不同），Git 自动合并可能将两份都保留，导致类/函数重复定义。
-
-## 手动合并与检查流程
+建议流程：
 
 ```bash
 git fetch upstream
-git merge --no-commit upstream/main    # 不自动提交，先检查
-# 解决冲突（如有）
-git diff --cached                       # 审查暂存区变更，检查是否有重复定义
-git commit                              # 确认无误后提交
+git merge --no-commit upstream/main
+git diff --cached
 ```
 
-## 合并后检查要点
+合并后必须检查：
 
-无论使用何种方式合并上游（命令行、PyCharm、rebase），合并完成后都需要检查：
+1. 是否出现重复 class/function 定义
+2. 本 Fork 定制是否被上游覆盖
+3. OAuth 原始 body 透传、models proxy、动态代理、Docker/GHCR 配置是否仍正确
+4. 前端子模块是否仍指向 `Cognitohazard/clove-front`
 
-1. **重复代码**：Grep 检查是否有重复的 class/function 定义
-2. **定制代码完整性**：确认本项目独有的定制代码未被上游版本覆盖
-
-可以手动检查，也可以合并后让 Claude 执行自动检查。
+CI 中有每日 `auto-merge-upstream.yml`，冲突时会创建 issue。镜像发布由 `docker-publish.yml` 负责。
 
 # 文档索引
 
-## 功能文档
-
 | 文档 | 说明 |
 |------|------|
+| `README.md` | Fork 差异、部署入口、上游新增能力 |
 | `docs/proxy-settings.md` | 代理模式、轮换策略、健康管理 |
 | `docs/account-management-enhance.md` | 多账户搜索/筛选/排序/分页/批量操作 |
-| `docs/web-search-analysis.md` | 网络搜索机制分析、双链路实现方案 |
+| `docs/web-search-analysis.md` | Web Search 机制分析和双链路方案 |
 | `docs/anthropic-standard-streaming-notes.md` | 流式输出标准化策略、事件映射矩阵、引用标准化 |
-
-## 问题排查与经验
-
-| 文档 | 说明 |
-|------|------|
 | `docs/overloaded-error-analysis.md` | 503 Overloaded 根因分析与优化方案 |
 | `docs/hatch-build-issue.md` | Hatch 构建 force-include 问题 |
 | `docs/rnet-version-issue.md` | rnet 代理用法与 3.x 升级记录 |
