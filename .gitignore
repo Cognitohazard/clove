@@ -214,7 +214,7 @@ __marimo__/
 app/static/
 
 # Claude Code
-.claude/settings.local.json
+.claude/
 
 tmp/
 temp/
