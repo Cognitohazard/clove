@@ -36,6 +36,12 @@ Configurable `inject_claude_code_system_prompt` setting (default: `true`) to con
 
 **Where:** `app/core/config.py`, `app/processors/claude_ai/claude_api_processor.py`
 
+### Default 1M Context Window
+
+The `context-1m-2025-08-07` beta header is included on all OAuth API requests by default, matching Claude Code's behavior. Models that support it (Opus 4.6, Sonnet 4.6) get 1M token context automatically; others ignore it.
+
+**Where:** `app/processors/claude_ai/claude_api_processor.py`
+
 ### 1-Hour Cache TTL
 
 Cache service recognizes `1h` as a TTL value (resolves to 3600 seconds), in addition to existing TTL options.

@@ -277,8 +277,8 @@ class ClaudeAPIProcessor(BaseProcessor):
         effort 和 structured-outputs 已 GA，不再需要 beta header。
         客户端的 anthropic-beta header 会被透传（去重合并）。
         """
-        # oauth beta 是 OAuth 认证必需的
-        beta_features = ["oauth-2025-04-20"]
+        # oauth beta 是 OAuth 认证必需的；context-1m 默认启用 1M 上下文窗口
+        beta_features = ["oauth-2025-04-20", "context-1m-2025-08-07"]
 
         # 透传客户端 anthropic-beta header，与内部 beta 去重合并
         if original_request:
