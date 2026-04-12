@@ -1,42 +1,36 @@
 from typing import Optional, Union, Dict, Any, Literal
-from pydantic import BaseModel, RootModel, ConfigDict
+from pydantic import RootModel
 
-from .claude import ContentBlock, Message, Usage, TextCitation
+from .claude import BaseModel, ContentBlock, Message, Usage, TextCitation
 
 
 # Base event types
 class BaseEvent(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: str
 
 
 # Delta types
 class TextDelta(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["text_delta"]
     text: str
 
 
 class InputJsonDelta(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["input_json_delta"]
     partial_json: str
 
 
 class ThinkingDelta(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["thinking_delta"]
     thinking: str
 
 
 class SignatureDelta(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["signature_delta"]
     signature: str
 
 
 class CitationsDelta(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["citations_delta"]
     citation: TextCitation
 
@@ -51,16 +45,14 @@ Delta = Union[
 
 
 class MessageDeltaData(BaseModel):
-    model_config = ConfigDict(extra="allow")
     stop_reason: Optional[
-        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal"]
+        Literal["end_turn", "max_tokens", "model_context_window_exceeded", "stop_sequence", "tool_use", "pause_turn", "refusal"]
     ] = None
     stop_sequence: Optional[str] = None
 
 
 # Error model
 class ErrorInfo(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: str
     message: str
 

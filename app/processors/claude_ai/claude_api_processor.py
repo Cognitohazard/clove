@@ -1,3 +1,5 @@
+import json
+
 from app.core.http_client import (
     Response,
     AsyncSession,
@@ -9,7 +11,7 @@ from typing import Dict, Optional
 from loguru import logger
 from fastapi.responses import StreamingResponse
 
-from app.models.claude import MessagesAPIRequest, TextContent
+from app.models.claude import MessagesAPIRequest
 from app.processors.base import BaseProcessor
 from app.processors.claude_ai import ClaudeAIContext
 from app.services.account import account_manager
@@ -39,13 +41,13 @@ class ClaudeAPIProcessor(BaseProcessor):
         )
 
     async def _request_messages_api(
-        self, session: AsyncSession, request_json: str, headers: Dict[str, str]
+        self, session: AsyncSession, request_body: bytes, headers: Dict[str, str]
     ) -> Response:
         """Make HTTP request with retry mechanism for curl_cffi exceptions."""
         response: Response = await session.request(
             "POST",
             self.messages_api_url,
-            data=request_json,
+            data=request_body,
             headers=headers,
             stream=True,
         )
@@ -72,8 +74,6 @@ class ClaudeAPIProcessor(BaseProcessor):
             return context
 
         try:
-            self._maybe_insert_system_message(context)
-
             # First try to get account from cache service
             cached_account_id, checkpoints = cache_service.process_messages(
                 context.messages_api_request.model,
@@ -96,9 +96,7 @@ class ClaudeAPIProcessor(BaseProcessor):
                 )
 
             with account:
-                request_json = context.messages_api_request.model_dump_json(
-                    exclude_none=True
-                )
+                request_body = await self._prepare_request_body(context)
                 headers = self._prepare_headers(
                     account.oauth_token.access_token,
                     context.messages_api_request,
@@ -120,7 +118,7 @@ class ClaudeAPIProcessor(BaseProcessor):
                     )
 
                     response = await self._request_messages_api(
-                        session, request_json, headers
+                        session, request_body, headers
                     )
                 except RequestException as e:
                     # Transport layer error after HTTP retries exhausted
@@ -239,31 +237,33 @@ class ClaudeAPIProcessor(BaseProcessor):
 
         return context
 
-    def _maybe_insert_system_message(self, context: ClaudeAIContext) -> None:
-        """Optionally prepend the legacy Claude Code identity prompt."""
+    async def _prepare_request_body(self, context: ClaudeAIContext) -> bytes:
+        """Prepare the request body for the Claude API.
+
+        Uses the raw request body to avoid Pydantic round-trip stripping unknown fields.
+        If system prompt injection is enabled, patches the raw JSON directly.
+        """
+        raw_body = await context.original_request.body()
         if not settings.inject_claude_code_system_prompt:
-            return
+            return raw_body
 
-        request = context.messages_api_request
-        if not request:
-            return
+        # Patch system prompt in raw JSON without Pydantic
+        data = json.loads(raw_body)
+        system_block = {"type": "text", "text": self.LEGACY_CLAUDE_CODE_SYSTEM_PROMPT}
 
-        system_message = TextContent(
-            type="text", text=self.LEGACY_CLAUDE_CODE_SYSTEM_PROMPT
-        )
-
-        if isinstance(request.system, str) and request.system:
-            request.system = [
-                system_message,
-                TextContent(type="text", text=request.system),
-            ]
-        elif isinstance(request.system, list) and request.system:
-            if request.system[0].text == self.LEGACY_CLAUDE_CODE_SYSTEM_PROMPT:
-                logger.debug("Legacy Claude Code system prompt already present")
+        system = data.get("system")
+        if isinstance(system, str) and system:
+            data["system"] = [system_block, {"type": "text", "text": system}]
+        elif isinstance(system, list) and system:
+            first = system[0]
+            if isinstance(first, dict) and first.get("text") == self.LEGACY_CLAUDE_CODE_SYSTEM_PROMPT:
+                pass  # Already present
             else:
-                request.system = [system_message] + request.system
+                data["system"] = [system_block] + system
         else:
-            request.system = [system_message]
+            data["system"] = [system_block]
+
+        return json.dumps(data, ensure_ascii=False).encode()
 
     def _prepare_headers(
         self,

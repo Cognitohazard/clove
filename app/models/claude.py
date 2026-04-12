@@ -1,6 +1,12 @@
 from typing import Optional, List, Union, Literal, Dict, Any
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field, model_validator
 from enum import Enum
+
+
+class BaseModel(PydanticBaseModel):
+    """Project base model: extra="allow" by default so unknown fields pass through the proxy."""
+
+    model_config = ConfigDict(extra="allow")
 
 
 class Role(str, Enum):
@@ -34,7 +40,6 @@ class FileImageSource(BaseModel):
 
 # Web search result
 class WebSearchResult(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["web_search_result"]
     title: str
     url: str
@@ -50,7 +55,6 @@ class CacheControl(BaseModel):
 
 # Content types
 class TextCitation(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: str
     cited_text: Optional[str] = None
     title: Optional[str] = None
@@ -59,7 +63,6 @@ class TextCitation(BaseModel):
 
 
 class TextContent(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["text"]
     text: str
     citations: Optional[List[TextCitation]] = None
@@ -67,14 +70,12 @@ class TextContent(BaseModel):
 
 
 class ImageContent(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["image"]
     source: Base64ImageSource | URLImageSource | FileImageSource
     cache_control: Optional[CacheControl] = None
 
 
 class ThinkingContent(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["thinking"]
     thinking: str
     # Anthropic thinking 块在部分客户端校验中要求包含 signature 字段
@@ -83,13 +84,11 @@ class ThinkingContent(BaseModel):
 
 # redacted_thinking 块：API 可能返回被审查的思考内容
 class RedactedThinkingContent(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["redacted_thinking"]
     data: str
 
 
 class ToolUseContent(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["tool_use"]
     id: str
     name: str
@@ -98,7 +97,6 @@ class ToolUseContent(BaseModel):
 
 
 class ToolResultContent(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["tool_result"]
     tool_use_id: str
     content: str | List[TextContent | ImageContent]
@@ -107,7 +105,6 @@ class ToolResultContent(BaseModel):
 
 
 class ServerToolUseContent(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["server_tool_use"]
     id: str
     name: str
@@ -116,7 +113,6 @@ class ServerToolUseContent(BaseModel):
 
 
 class WebSearchToolResultContent(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["web_search_tool_result"]
     tool_use_id: str
     content: List[WebSearchResult]
@@ -136,19 +132,16 @@ ContentBlock = Union[
 
 
 class InputMessage(BaseModel):
-    model_config = ConfigDict(extra="allow")
     role: Role
     content: Union[str, List[ContentBlock]]
 
 
 class ThinkingOptions(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["enabled", "disabled", "adaptive"] = "disabled"
     budget_tokens: Optional[int] = None
 
 
 class ToolChoice(BaseModel):
-    model_config = ConfigDict(extra="allow")
     type: Literal["auto", "any", "tool", "none"] = "auto"
     name: Optional[str] = None
     disable_parallel_tool_use: Optional[bool] = None
@@ -156,36 +149,31 @@ class ToolChoice(BaseModel):
 
 # 工具定义（支持用户自定义工具和 Server Tool 如 web_search）
 class Tool(BaseModel):
-    model_config = ConfigDict(extra="allow")
     name: str
-    input_schema: Optional[Any] = None  # Server Tool（如 web_search）无此字段，改为可选
+    type: Optional[str] = None  # Server Tool（如 web_search）使用此字段
+    input_schema: Optional[Any] = None  # Server Tool 无此字段，改为可选
     description: Optional[str] = None
 
 
 class OutputConfig(BaseModel):
     """Output configuration (effort, format, etc). effort and structured outputs are now GA."""
 
-    model_config = ConfigDict(extra="allow")
     effort: Optional[Literal["low", "medium", "high", "max"]] = None
 
 
 class OutputFormat(BaseModel):
     """Output format for structured outputs (deprecated, use output_config.format instead)."""
 
-    model_config = ConfigDict(
-        extra="allow", populate_by_name=True, serialize_by_alias=True
-    )
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
     type: Literal["json_schema"]
     schema_: Optional[Dict[str, Any]] = Field(default=None, alias="schema")
 
 
 class ServerToolUsage(BaseModel):
-    model_config = ConfigDict(extra="allow")
     web_search_requests: Optional[int] = None
 
 
 class Usage(BaseModel):
-    model_config = ConfigDict(extra="allow")
     input_tokens: int
     output_tokens: int
     cache_creation_input_tokens: Optional[int] = 0
@@ -194,8 +182,7 @@ class Usage(BaseModel):
 
 
 class MessagesAPIRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    model: str = Field(default="claude-opus-4-20250514")
+    model: str = Field(default="claude-sonnet-4-6")
     messages: List[InputMessage]
     max_tokens: int = Field(default=8192, ge=1)
     system: Optional[str | List[TextContent]] = None
@@ -225,7 +212,6 @@ class MessagesAPIRequest(BaseModel):
 
 
 class Message(BaseModel):
-    model_config = ConfigDict(extra="allow")
     id: str
     type: Literal["message"]
     role: Literal["assistant"]
@@ -235,6 +221,7 @@ class Message(BaseModel):
         Literal[
             "end_turn",
             "max_tokens",
+            "model_context_window_exceeded",
             "stop_sequence",
             "tool_use",
             "pause_turn",
