@@ -43,15 +43,14 @@ class ClaudeAPIProcessor(BaseProcessor):
     async def _request_messages_api(
         self, session: AsyncSession, request_body: bytes, headers: Dict[str, str]
     ) -> Response:
-        """Make HTTP request with retry mechanism for curl_cffi exceptions."""
-        response: Response = await session.request(
+        """Make a single upstream Messages API request."""
+        return await session.request(
             "POST",
             self.messages_api_url,
             data=request_body,
             headers=headers,
             stream=True,
         )
-        return response
 
     async def process(self, context: ClaudeAIContext) -> ClaudeAIContext:
         """
@@ -109,20 +108,26 @@ class ClaudeAPIProcessor(BaseProcessor):
                 )
 
                 session: Optional[AsyncSession] = None
+
+                async def close_session() -> None:
+                    if session:
+                        await session.close()
+
                 try:
                     session = create_session(
                         proxy=proxy_url,
                         timeout=settings.request_timeout,
                         impersonate="chrome",
                         follow_redirects=False,
+                        request_retries=1,
                     )
 
                     response = await self._request_messages_api(
                         session, request_body, headers
                     )
                 except RequestException as e:
-                    # Transport layer error after HTTP retries exhausted
-                    # Mark proxy as unhealthy and wrap as retryable AppError
+                    # Mark proxy transport failures as retryable for non-transparent callers.
+                    await close_session()
                     if proxy_url:
                         await proxy_service.mark_unhealthy(
                             proxy_url,
@@ -149,6 +154,7 @@ class ClaudeAPIProcessor(BaseProcessor):
                     next_hour = datetime.now(UTC).replace(
                         minute=0, second=0, microsecond=0
                     ) + timedelta(hours=1)
+                    await close_session()
                     raise ClaudeRateLimitedError(
                         resets_at=account.resets_at or next_hour
                     )
@@ -182,6 +188,7 @@ class ClaudeAPIProcessor(BaseProcessor):
                         response.status_code == 400
                         and error_message == "system: Invalid model name"
                     ):
+                        await close_session()
                         raise InvalidModelNameError(context.messages_api_request.model)
 
                     if (
@@ -189,12 +196,14 @@ class ClaudeAPIProcessor(BaseProcessor):
                         and error_message
                         == "OAuth authentication is currently not allowed for this organization."
                     ):
+                        await close_session()
                         raise OAuthAuthenticationNotAllowedError()
 
                     logger.error(
                         f"Claude API error: {response.status_code} - {error_data}"
                     )
                     # invalid_request_error 是请求本身有问题，重试不会改变结果
+                    await close_session()
                     raise ClaudeHttpError(
                         url=self.messages_api_url,
                         status_code=response.status_code,
@@ -204,10 +213,11 @@ class ClaudeAPIProcessor(BaseProcessor):
                     )
 
                 async def stream_response():
-                    async for chunk in response.aiter_bytes():
-                        yield chunk
-
-                    await session.close()
+                    try:
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+                    finally:
+                        await close_session()
 
                 filtered_headers = {}
                 for key, value in response.headers.items():
@@ -227,10 +237,8 @@ class ClaudeAPIProcessor(BaseProcessor):
                 logger.info("Successfully processed request via Claude API")
 
                 # Store checkpoints in cache service after successful request
-                if checkpoints and account:
-                    cache_service.add_checkpoints(
-                        checkpoints, account.organization_uuid
-                    )
+                if checkpoints:
+                    cache_service.add_checkpoints(checkpoints, account.organization_uuid)
 
         except (NoAccountsAvailableError, InvalidModelNameError):
             logger.debug("No accounts available for Claude API, continuing pipeline")
@@ -277,8 +285,8 @@ class ClaudeAPIProcessor(BaseProcessor):
         effort 和 structured-outputs 已 GA，不再需要 beta header。
         客户端的 anthropic-beta header 会被透传（去重合并）。
         """
-        # oauth beta 是 OAuth 认证必需的；context-1m 默认启用 1M 上下文窗口
-        beta_features = ["oauth-2025-04-20", "context-1m-2025-08-07"]
+        # oauth beta 是 OAuth 认证必需的。
+        beta_features = ["oauth-2025-04-20"]
 
         # 透传客户端 anthropic-beta header，与内部 beta 去重合并
         if original_request:

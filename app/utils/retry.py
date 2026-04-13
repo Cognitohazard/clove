@@ -13,15 +13,14 @@ def log_before_sleep(retry_state: RetryCallState) -> None:
     """Custom before_sleep callback that safely logs retry attempts."""
     attempt_number = retry_state.attempt_number
     exception = retry_state.outcome.exception() if retry_state.outcome else None
+    fn_name = retry_state.fn.__name__ if retry_state.fn else "operation"
 
     if exception:
         exception_type = type(exception).__name__
         logger.warning(
-            f"Retrying {retry_state.fn.__name__} after attempt {attempt_number} "
+            f"Retrying {fn_name} after attempt {attempt_number} "
             f"due to {exception_type}: {str(exception)}"
         )
 
     else:
-        logger.warning(
-            f"Retrying {retry_state.fn.__name__} after attempt {attempt_number}"
-        )
+        logger.warning(f"Retrying {fn_name} after attempt {attempt_number}")

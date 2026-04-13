@@ -1,9 +1,10 @@
 """HTTP client abstraction layer that supports both curl_cffi and httpx."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from typing import Optional, Dict, Any, Tuple, AsyncIterator
 from tenacity import (
-    retry,
+    AsyncRetrying,
     retry_if_exception_type,
     stop_after_attempt,
     wait_fixed,
@@ -47,6 +48,27 @@ if not RNET_AVAILABLE and not CURL_CFFI_AVAILABLE and not HTTPX_AVAILABLE:
     raise ImportError(
         "Neither rnet, curl_cffi nor httpx is installed. Please install at least one of them."
     )
+
+
+async def _run_with_retries(
+    operation: Callable[[], Awaitable[Any]],
+    retry_exception: type[BaseException],
+    attempts: int,
+) -> Any:
+    if attempts <= 1:
+        return await operation()
+
+    async for attempt in AsyncRetrying(
+        stop=stop_after_attempt(attempts),
+        wait=wait_fixed(settings.request_retry_interval),
+        retry=retry_if_exception_type(retry_exception),
+        before_sleep=log_before_sleep,
+        reraise=True,
+    ):
+        with attempt:
+            return await operation()
+
+    raise RuntimeError("Retry loop exited without returning or raising")
 
 
 class Response(ABC):
@@ -206,7 +228,9 @@ if CURL_CFFI_AVAILABLE:
             impersonate: Optional[str] = "chrome",
             proxy: Optional[str] = settings.proxy_url,
             follow_redirects: bool = True,
+            request_retries: int = settings.request_retries,
         ):
+            self._request_retries = request_retries
             self._session = CurlAsyncSession(
                 timeout=timeout,
                 impersonate=impersonate or None,
@@ -248,13 +272,6 @@ if CURL_CFFI_AVAILABLE:
 
             return multipart
 
-        @retry(
-            stop=stop_after_attempt(settings.request_retries),
-            wait=wait_fixed(settings.request_retry_interval),
-            retry=retry_if_exception_type(CurlRequestException),
-            before_sleep=log_before_sleep,
-            reraise=True,
-        )
         async def request(
             self,
             method: str,
@@ -270,26 +287,32 @@ if CURL_CFFI_AVAILABLE:
             # Handle file uploads - convert files parameter to multipart
             files = kwargs.pop("files", None)
 
-            multipart = None
+            async def operation() -> Response:
+                request_kwargs = kwargs.copy()
+                multipart = None
 
-            if files:
-                multipart = self.process_files(files)
-                kwargs["multipart"] = multipart
+                if files:
+                    multipart = self.process_files(files)
+                    request_kwargs["multipart"] = multipart
 
-            try:
-                response = await self._session.request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    json=json,
-                    data=data,
-                    stream=stream,
-                    **kwargs,
-                )
-                return CurlResponseWrapper(response, stream=stream)
-            finally:
-                if multipart:
-                    multipart.close()
+                try:
+                    response = await self._session.request(
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        json=json,
+                        data=data,
+                        stream=stream,
+                        **request_kwargs,
+                    )
+                    return CurlResponseWrapper(response, stream=stream)
+                finally:
+                    if multipart:
+                        multipart.close()
+
+            return await _run_with_retries(
+                operation, CurlRequestException, self._request_retries
+            )
 
         async def close(self):
             await self._session.close()
@@ -306,7 +329,9 @@ if RNET_AVAILABLE:
             impersonate: Optional[str] = "chrome",
             proxy: Optional[str] = settings.proxy_url,
             follow_redirects: bool = True,
+            request_retries: int = settings.request_retries,
         ):
+            self._request_retries = request_retries
             # Map impersonate string to rnet Emulation enum
             emulation_map = {
                 "chrome": rnet.Emulation.Chrome142,
@@ -335,13 +360,6 @@ if RNET_AVAILABLE:
                 allow_redirects=follow_redirects,
             )
 
-        @retry(
-            stop=stop_after_attempt(settings.request_retries),
-            wait=wait_fixed(settings.request_retry_interval),
-            retry=retry_if_exception_type(RnetRequestError),
-            before_sleep=log_before_sleep,
-            reraise=True,
-        )
         async def request(
             self,
             method: str,
@@ -353,81 +371,85 @@ if RNET_AVAILABLE:
             **kwargs,
         ) -> Response:
             logger.debug(f"Making {method} request to {url}")
-
-            # Map method string to rnet Method enum
-            method_map = {
-                "GET": RnetMethod.GET,
-                "POST": RnetMethod.POST,
-                "PUT": RnetMethod.PUT,
-                "DELETE": RnetMethod.DELETE,
-                "PATCH": RnetMethod.PATCH,
-                "HEAD": RnetMethod.HEAD,
-                "OPTIONS": RnetMethod.OPTIONS,
-                "TRACE": RnetMethod.TRACE,
-            }
-
-            rnet_method = method_map.get(method.upper(), RnetMethod.GET)
-
-            # Handle file uploads - convert files parameter to multipart
             files = kwargs.pop("files", None)
-            multipart = None
 
-            if files:
-                # Convert files dict to rnet Multipart
-                parts = []
-                for field_name, file_info in files.items():
-                    if isinstance(file_info, tuple):
-                        # Format: {"field": (filename, data, content_type)}
-                        if len(file_info) >= 3:
-                            filename, file_data, content_type = file_info[:3]
-                        elif len(file_info) == 2:
-                            filename, file_data = file_info
-                            content_type = "application/octet-stream"
+            async def operation() -> Response:
+                request_kwargs = kwargs.copy()
+
+                # Map method string to rnet Method enum
+                method_map = {
+                    "GET": RnetMethod.GET,
+                    "POST": RnetMethod.POST,
+                    "PUT": RnetMethod.PUT,
+                    "DELETE": RnetMethod.DELETE,
+                    "PATCH": RnetMethod.PATCH,
+                    "HEAD": RnetMethod.HEAD,
+                    "OPTIONS": RnetMethod.OPTIONS,
+                    "TRACE": RnetMethod.TRACE,
+                }
+
+                rnet_method = method_map.get(method.upper(), RnetMethod.GET)
+
+                # Handle file uploads - convert files parameter to multipart
+                multipart = None
+
+                if files:
+                    # Convert files dict to rnet Multipart
+                    parts = []
+                    for field_name, file_info in files.items():
+                        if isinstance(file_info, tuple):
+                            # Format: {"field": (filename, data, content_type)}
+                            if len(file_info) >= 3:
+                                filename, file_data, content_type = file_info[:3]
+                            elif len(file_info) == 2:
+                                filename, file_data = file_info
+                                content_type = "application/octet-stream"
+                            else:
+                                raise ValueError(
+                                    f"Invalid file tuple format for field {field_name}"
+                                )
+
+                            parts.append(
+                                rnet.Part(
+                                    name=field_name,
+                                    value=file_data,
+                                    filename=filename,
+                                    mime=content_type,
+                                )
+                            )
                         else:
-                            raise ValueError(
-                                f"Invalid file tuple format for field {field_name}"
-                            )
+                            # Simple format: {"field": data}
+                            parts.append(rnet.Part(name=field_name, value=file_info))
 
-                        parts.append(
-                            rnet.Part(
-                                name=field_name,
-                                value=file_data,
-                                filename=filename,
-                                mime=content_type,
-                            )
+                    multipart = rnet.Multipart(*parts)
+                    request_kwargs["multipart"] = multipart
+
+                if headers:
+                    request_kwargs["headers"] = headers
+                if json is not None:
+                    request_kwargs["json"] = json
+                elif data is not None:
+                    # rnet uses 'form' for form data, 'body' for raw data
+                    if isinstance(data, dict) or isinstance(data, list):
+                        request_kwargs["form"] = (
+                            [(k, v) for k, v in data.items()]
+                            if isinstance(data, dict)
+                            else data
                         )
                     else:
-                        # Simple format: {"field": data}
-                        parts.append(rnet.Part(name=field_name, value=file_info))
+                        request_kwargs["body"] = data
 
-                multipart = rnet.Multipart(*parts)
-                kwargs["multipart"] = multipart
+                response = await self._client.request(
+                    method=rnet_method,
+                    url=url,
+                    **request_kwargs,
+                )
 
-            request_kwargs = {}
-            if headers:
-                request_kwargs["headers"] = headers
-            if json is not None:
-                request_kwargs["json"] = json
-            elif data is not None:
-                # rnet uses 'form' for form data, 'body' for raw data
-                if isinstance(data, dict) or isinstance(data, list):
-                    request_kwargs["form"] = (
-                        [(k, v) for k, v in data.items()]
-                        if isinstance(data, dict)
-                        else data
-                    )
-                else:
-                    request_kwargs["body"] = data
+                return RnetResponse(response)
 
-            request_kwargs.update(kwargs)
-
-            response = await self._client.request(
-                method=rnet_method,
-                url=url,
-                **request_kwargs,
+            return await _run_with_retries(
+                operation, RnetRequestError, self._request_retries
             )
-
-            return RnetResponse(response)
 
         async def close(self):
             # rnet Client doesn't have an explicit close method
@@ -446,7 +468,9 @@ if HTTPX_AVAILABLE:
             impersonate: Optional[str] = "chrome",
             proxy: Optional[str] = settings.proxy_url,
             follow_redirects: bool = True,
+            request_retries: int = settings.request_retries,
         ):
+            self._request_retries = request_retries
             self._client = httpx.AsyncClient(
                 timeout=timeout,
                 proxy=proxy,
@@ -487,13 +511,6 @@ if HTTPX_AVAILABLE:
 
             return response
 
-        @retry(
-            stop=stop_after_attempt(settings.request_retries),
-            wait=wait_fixed(settings.request_retry_interval),
-            retry=retry_if_exception_type(httpx.RequestError),
-            before_sleep=log_before_sleep,
-            reraise=True,
-        )
         async def request(
             self,
             method: str,
@@ -505,26 +522,32 @@ if HTTPX_AVAILABLE:
             **kwargs,
         ) -> Response:
             logger.debug(f"Making {method} request to {url}")
-            if stream:
-                response = await self.stream(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    json=json,
-                    data=data,
-                    **kwargs,
-                )
-            else:
-                response = await self._client.request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    json=json,
-                    data=data,
-                    **kwargs,
-                )
 
-            return HttpxResponse(response)
+            async def operation() -> Response:
+                if stream:
+                    response = await self.stream(
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        json=json,
+                        data=data,
+                        **kwargs,
+                    )
+                else:
+                    response = await self._client.request(
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        json=json,
+                        data=data,
+                        **kwargs,
+                    )
+
+                return HttpxResponse(response)
+
+            return await _run_with_retries(
+                operation, httpx.RequestError, self._request_retries
+            )
 
         async def close(self):
             await self._client.aclose()
@@ -535,6 +558,7 @@ def create_session(
     impersonate: Optional[str] = "chrome",
     proxy: Optional[str] = settings.proxy_url,
     follow_redirects: bool = True,
+    request_retries: int = settings.request_retries,
 ) -> AsyncSession:
     """Create an async session using the available HTTP client.
 
@@ -547,6 +571,7 @@ def create_session(
             impersonate=impersonate,
             proxy=proxy,
             follow_redirects=follow_redirects,
+            request_retries=request_retries,
         )
     elif CURL_CFFI_AVAILABLE:
         logger.debug("Using curl_cffi as HTTP client")
@@ -555,6 +580,7 @@ def create_session(
             impersonate=impersonate,
             proxy=proxy,
             follow_redirects=follow_redirects,
+            request_retries=request_retries,
         )
     else:
         logger.debug("Using httpx as HTTP client (rnet and curl_cffi not available)")
@@ -563,6 +589,7 @@ def create_session(
             impersonate=impersonate,
             proxy=proxy,
             follow_redirects=follow_redirects,
+            request_retries=request_retries,
         )
 
 
