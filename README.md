@@ -2,6 +2,8 @@
 
 Fork of [Huan-zhaojun/clove](https://github.com/Huan-zhaojun/clove), which is itself a fork of [mirrorange/clove](https://github.com/mirrorange/clove).
 
+This fork tries to keep the OAuth API path as close to a transparent Anthropic proxy as practical: preserve the original Messages API request body, pass through client API fields and beta headers, and avoid proxy-side behavior that can change upstream semantics.
+
 For base project documentation (features, limitations, API usage, configuration), see the upstream READMEs.
 
 ## Quick Start
@@ -36,11 +38,19 @@ Configurable `inject_claude_code_system_prompt` setting (default: `true`) to con
 
 **Where:** `app/core/config.py`, `app/processors/claude_ai/claude_api_processor.py`
 
-### Default 1M Context Window
+### Messages API Single-Attempt Proxying
 
-The `context-1m-2025-08-07` beta header is included on all OAuth API requests by default, matching Claude Code's behavior. Models that support it (Opus 4.6, Sonnet 4.6) get 1M token context automatically; others ignore it.
+`POST /v1/messages` now makes exactly one upstream Messages API attempt on the OAuth path. The route-level retry wrapper was removed, and the OAuth Messages session overrides HTTP transport retries with `request_retries=1`. This avoids duplicate upstream generations when a streamed request fails after Anthropic has already accepted it.
 
-**Where:** `app/processors/claude_ai/claude_api_processor.py`
+Shared HTTP sessions still support configurable transport retries through `REQUEST_RETRIES` and `REQUEST_RETRY_INTERVAL`, so other callers can keep retry behavior without forcing it onto Messages API proxying.
+
+**Where:** `app/api/routes/claude.py`, `app/core/http_client.py`, `app/processors/claude_ai/claude_api_processor.py`
+
+### OAuth Beta Header Passthrough
+
+OAuth Messages and Models proxy requests inject the required `oauth-2025-04-20` beta header and merge any client-provided `anthropic-beta` values without duplicating entries. Optional betas such as `context-1m-2025-08-07` should be supplied by the client when needed instead of being forced globally by the proxy.
+
+**Where:** `app/processors/claude_ai/claude_api_processor.py`, `app/api/routes/models.py`
 
 ### 1-Hour Cache TTL
 
