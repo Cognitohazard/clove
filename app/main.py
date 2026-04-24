@@ -7,6 +7,10 @@ from app.api.main import api_router
 from app.core.config import settings
 from app.core.error_handler import app_exception_handler
 from app.core.exceptions import AppError
+from app.core.observability import (
+    RequestObservabilityMiddleware,
+    build_default_exporter,
+)
 from app.core.static import register_static_routes
 from app.utils.logger import configure_logger
 from app.services.account import account_manager
@@ -114,6 +118,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Outer-most so duration covers CORS, routing, and auth resolution.
+app.add_middleware(
+    RequestObservabilityMiddleware,
+    exporter=build_default_exporter(),
+)
+
 # Include routers
 app.include_router(api_router)
 
@@ -148,6 +158,8 @@ async def health():
 register_static_routes(app)
 
 # Exception handlers
+# Unhandled exceptions are caught by RequestObservabilityMiddleware so the
+# 500 response flows through our x-request-id injector.
 app.add_exception_handler(AppError, app_exception_handler)
 
 

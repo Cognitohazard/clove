@@ -211,6 +211,38 @@ class Settings(BaseSettings):
         description="Log file compression format",
     )
 
+    # Observability — structured per-request access log
+    access_log_enabled: bool = Field(
+        default=False,
+        env="ACCESS_LOG_ENABLED",
+        description="Emit one structured JSON record per /v1/* request",
+    )
+    access_log_path: str = Field(
+        default="logs/access.log",
+        env="ACCESS_LOG_PATH",
+        description="Path for the JSON access log sink",
+    )
+    access_log_rotation: str = Field(
+        default="100 MB",
+        env="ACCESS_LOG_ROTATION",
+        description="Rotation policy for the access log",
+    )
+    access_log_retention: str = Field(
+        default="14 days",
+        env="ACCESS_LOG_RETENTION",
+        description="Retention policy for rotated access logs",
+    )
+    access_log_sample_rate_ok: float = Field(
+        default=1.0,
+        env="ACCESS_LOG_SAMPLE_RATE_OK",
+        description="Fraction of successful requests to record (0.0–1.0)",
+    )
+    access_log_sample_rate_error: float = Field(
+        default=1.0,
+        env="ACCESS_LOG_SAMPLE_RATE_ERROR",
+        description="Fraction of failed requests to record (0.0–1.0)",
+    )
+
     # Session management settings
     session_timeout: int = Field(
         default=300,

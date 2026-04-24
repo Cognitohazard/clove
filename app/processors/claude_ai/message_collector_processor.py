@@ -2,6 +2,7 @@ import json5
 from typing import AsyncIterator
 from loguru import logger
 
+from app.core.observability import current_span
 from app.processors.base import BaseProcessor
 from app.processors.claude_ai import ClaudeAIContext
 from app.models.streaming import (
@@ -102,9 +103,8 @@ class MessageCollectorProcessor(BaseProcessor):
 
             elif isinstance(event.root, ContentBlockStopEvent):
                 # Boundary checking to prevent IndexError caused by refusal responses
-                if (
-                    context.collected_message
-                    and event.root.index < len(context.collected_message.content)
+                if context.collected_message and event.root.index < len(
+                    context.collected_message.content
                 ):
                     block = context.collected_message.content[event.root.index]
                     if isinstance(block, (ToolUseContent, ServerToolUseContent)):
@@ -145,8 +145,8 @@ class MessageCollectorProcessor(BaseProcessor):
                                     type="error",
                                     error=ErrorInfo(
                                         type="refusal",
-                                        message="Chat paused: Claude's safety filters flagged this message. This occasionally happens with normal, safe messages. Try rephrasing or using a different model."
-                                    )
+                                        message="Chat paused: Claude's safety filters flagged this message. This occasionally happens with normal, safe messages. Try rephrasing or using a different model.",
+                                    ),
                                 )
                             )
                             yield error_event
@@ -156,6 +156,9 @@ class MessageCollectorProcessor(BaseProcessor):
                         )
                 if context.collected_message and event.root.usage:
                     context.collected_message.usage = event.root.usage
+                    span = current_span()
+                    if span is not None:
+                        span.update_usage(event.root.usage)
 
             elif isinstance(event.root, MessageStopEvent):
                 if context.collected_message:

@@ -5,6 +5,7 @@ import secrets
 
 from app.core.config import settings
 from app.core.exceptions import InvalidAPIKeyError
+from app.core.observability import current_span
 
 _temp_admin_api_key: Optional[str] = None
 
@@ -52,6 +53,7 @@ async def verify_api_key(
     if api_key not in valid_keys:
         raise InvalidAPIKeyError()
 
+    _tag_span(api_key)
     return api_key
 
 
@@ -73,7 +75,14 @@ async def verify_admin_api_key(
     if api_key not in valid_keys:
         raise InvalidAPIKeyError()
 
+    _tag_span(api_key)
     return api_key
 
 
 AdminAuthDep = Annotated[str, Depends(verify_admin_api_key)]
+
+
+def _tag_span(api_key: str) -> None:
+    span = current_span()
+    if span is not None:
+        span.set_client_key(api_key)

@@ -1,6 +1,7 @@
 from typing import List, Optional
 from loguru import logger
 
+from app.core.observability import current_span
 from app.services.session import session_manager
 from app.processors.pipeline import ProcessingPipeline
 from app.processors.base import BaseProcessor
@@ -70,6 +71,13 @@ class ClaudeAIPipeline(ProcessingPipeline):
         Raises:
             Exception: If any processor fails or no response is generated
         """
+        span = current_span()
+        if span is not None and context.messages_api_request is not None:
+            span.set_model(
+                context.messages_api_request.model,
+                stream=bool(context.messages_api_request.stream),
+            )
+
         try:
             return await super().process(context)
         except Exception as e:

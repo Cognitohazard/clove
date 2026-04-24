@@ -41,7 +41,12 @@ class EventParser:
             self.buffer += chunk
 
             async for event in self._process_buffer():
-                logger.debug(f"Parsed event:\n{event.model_dump()}")
+                # Defer model_dump(): on the OAuth SSE usage-tap path this log
+                # fires once per event; eagerly serializing is hot-path waste
+                # when DEBUG is off.
+                logger.opt(lazy=True).debug(
+                    "Parsed event:\n{}", lambda ev=event: ev.model_dump()
+                )
                 yield event
 
         async for event in self.flush():
