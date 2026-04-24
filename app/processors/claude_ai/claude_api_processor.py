@@ -12,6 +12,8 @@ from loguru import logger
 from fastapi.responses import StreamingResponse
 
 from app.models.claude import MessagesAPIRequest
+from app.core.observability import current_span
+from app.core.observability.usage_tap import create_usage_tap
 from app.processors.base import BaseProcessor
 from app.processors.claude_ai import ClaudeAIContext
 from app.services.account import account_manager
@@ -94,6 +96,10 @@ class ClaudeAPIProcessor(BaseProcessor):
                     else None
                 )
 
+            span = current_span()
+            if span is not None:
+                span.set_upstream("oauth", account_id=account.organization_uuid)
+
             with account:
                 request_body = await self._prepare_request_body(context)
                 headers = self._prepare_headers(
@@ -130,8 +136,7 @@ class ClaudeAPIProcessor(BaseProcessor):
                     await close_session()
                     if proxy_url:
                         await proxy_service.mark_unhealthy(
-                            proxy_url,
-                            reason=f"connection error: {type(e).__name__}"
+                            proxy_url, reason=f"connection error: {type(e).__name__}"
                         )
                     raise ProxyConnectionError(
                         proxy_url=proxy_url,
@@ -171,7 +176,9 @@ class ClaudeAPIProcessor(BaseProcessor):
                         # Empty or invalid JSON response
                         error_data = {}
                         error_type = "empty_response"
-                        error_message = f"HTTP {response.status_code} error with empty response"
+                        error_message = (
+                            f"HTTP {response.status_code} error with empty response"
+                        )
 
                     # HTTP 403 with empty response and proxy: likely IP banned
                     if (
@@ -212,11 +219,15 @@ class ClaudeAPIProcessor(BaseProcessor):
                         retryable=error_type != "invalid_request_error",
                     )
 
+                tap = create_usage_tap(span, response.headers.get("content-type", ""))
+
                 async def stream_response():
                     try:
                         async for chunk in response.aiter_bytes():
+                            tap.feed(chunk)
                             yield chunk
                     finally:
+                        await tap.close()
                         await close_session()
 
                 filtered_headers = {}
@@ -238,7 +249,9 @@ class ClaudeAPIProcessor(BaseProcessor):
 
                 # Store checkpoints in cache service after successful request
                 if checkpoints:
-                    cache_service.add_checkpoints(checkpoints, account.organization_uuid)
+                    cache_service.add_checkpoints(
+                        checkpoints, account.organization_uuid
+                    )
 
         except (NoAccountsAvailableError, InvalidModelNameError):
             logger.debug("No accounts available for Claude API, continuing pipeline")
@@ -264,7 +277,10 @@ class ClaudeAPIProcessor(BaseProcessor):
             data["system"] = [system_block, {"type": "text", "text": system}]
         elif isinstance(system, list) and system:
             first = system[0]
-            if isinstance(first, dict) and first.get("text") == self.LEGACY_CLAUDE_CODE_SYSTEM_PROMPT:
+            if (
+                isinstance(first, dict)
+                and first.get("text") == self.LEGACY_CLAUDE_CODE_SYSTEM_PROMPT
+            ):
                 pass  # Already present
             else:
                 data["system"] = [system_block] + system

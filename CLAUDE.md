@@ -163,6 +163,39 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 - `web_search_*` server tool 会映射为 Claude.ai Web 端 `web_search_v0`
 - `thinking.enabled` 或 `thinking.adaptive` 会启用网页端 extended/paprika 模式
 
+# 请求可观测性
+
+代码位于 `app/core/observability/`，注册为最外层 ASGI 中间件。
+
+组件：
+
+| 文件 | 用途 |
+|------|------|
+| `span.py` | `RequestSpan` 数据类，`UsageSnapshot`，`classify_status`，`mask_key`/`mask_uuid` |
+| `context.py` | ContextVar 包装的 `current_span()` |
+| `exporter.py` | `SpanExporter` Protocol 及 `LoguruExporter` / `MultiExporter` / `SampledExporter` / `NullExporter` |
+| `middleware.py` | 纯 ASGI `RequestObservabilityMiddleware`，包含 `build_default_exporter()` |
+| `usage_tap.py` | `UsageTap` Protocol 及 `SSEUsageTap` / `JSONUsageTap` / `NullUsageTap` |
+
+关键行为：
+
+- 只对 `/v1/*` 请求启 span，`/api/admin`、`/health`、静态资源不记录
+- `x-request-id` 来自请求头；缺省则生成 `uuid4().hex`，响应头回写
+- 未处理异常由中间件自身捕获并返回 JSON 500，保证 `x-request-id` 能写入响应头；不会冒泡到 Starlette 默认的 `ServerErrorMiddleware`
+- Pipeline 各处理器通过 `current_span()` 写入属性：
+  - `ClaudeAIPipeline.process` 写 `model` / `stream`
+  - `ClaudeAPIProcessor` 写 `upstream="oauth"` / `account_id`
+  - `ClaudeWebProcessor` 写 `upstream="web"` / `account_id`
+  - `MessageCollectorProcessor` 写 `usage.*`（Web 链路）
+  - OAuth 链路额外使用 `create_usage_tap(span, content_type)`；SSE 走 `EventParser`，JSON 走整体缓冲解析
+  - `verify_api_key` / `verify_admin_api_key` 写 `client_key`
+- 终态信息由中间件写入：`status`（`ok`/`client_error`/`rate_limited`/`auth_error`/`upstream_error`/`exception`）、`http_status`、`error`
+- `to_record()` 输出时自动 mask `account_id` 和 `client_key`
+- `app/utils/logger.py` 通过 `logger.configure(patcher=...)` 把 `request_id` / `model` / `account_id` / `client_key` 注入每条日志的 `extra`，使任意位置的 log 都能 grep 按请求
+- `request.complete` 记录用 `filter=` 分流到 `access.log`（`serialize=True`，按配置轮转）；stdout/app.log 过滤掉该事件
+
+测试位于 `tests/`，覆盖 span 数据类、四种 exporter、四种状态场景的中间件行为、`UsageTap` 分发与跨 chunk 解析。
+
 # 核心服务
 
 | 服务 | 文件 | 用途 |
@@ -232,6 +265,10 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 - `PROXY_URL` 旧固定代理配置，启动时会迁移到新 `proxy` 配置
 - `NO_FILESYSTEM_MODE` 会禁用文件读写，账户和配置只保存在内存中
 - `MAX_MODELS` 默认包含 `claude-opus-4-6`，用于选择 Max 账户
+- `ACCESS_LOG_ENABLED`（默认 `false`）开启结构化请求访问日志
+- `ACCESS_LOG_PATH`（默认 `logs/access.log`）访问日志路径
+- `ACCESS_LOG_ROTATION`（默认 `100 MB`）/ `ACCESS_LOG_RETENTION`（默认 `14 days`）轮转与保留
+- `ACCESS_LOG_SAMPLE_RATE_OK`（默认 `1.0`）成功请求采样率；`ACCESS_LOG_SAMPLE_RATE_ERROR`（默认 `1.0`）失败请求采样率
 
 # 动态代理
 

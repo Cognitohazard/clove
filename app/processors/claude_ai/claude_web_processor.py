@@ -5,6 +5,7 @@ import string
 from typing import List
 from loguru import logger
 
+from app.core.observability import current_span
 from app.processors.base import BaseProcessor
 from app.processors.claude_ai import ClaudeAIContext
 from app.services.session import session_manager
@@ -174,6 +175,14 @@ class ClaudeWebProcessor(BaseProcessor):
 
             context.claude_web_request = web_request
             logger.debug(f"Built web request with {len(image_file_ids)} images")
+
+        span = current_span()
+        if span is not None:
+            account = getattr(context.claude_session, "account", None)
+            span.set_upstream(
+                "web",
+                account_id=getattr(account, "organization_uuid", None),
+            )
 
         # Step 3: Send to Claude
         logger.debug(
