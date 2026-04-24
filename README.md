@@ -66,6 +66,14 @@ Three fixes to prevent OAuth token loss and unnecessary retries:
 - **429 retry guard:** Stops aggressive retry stacking on OAuth token endpoint 429 responses. (`app/services/oauth.py`)
 - **Plain HTTP client for token exchange:** Dedicated `create_plain_session()` and `_token_request()` that use a non-impersonating HTTP client (prefers httpx) with form-encoded data and `claude-cli` User-Agent for `console.anthropic.com` OAuth endpoints. Prevents 429s caused by browser TLS fingerprints. Based on upstream mirrorange/clove@156efcd. (`app/core/http_client.py`, `app/services/oauth.py`)
 
+### Structured Request Observability
+
+Per-request `RequestSpan` emitted as one JSON line to a dedicated `access.log` (disabled by default). Covers model, upstream (oauth/web), account, client key, HTTP status, duration, token usage and cache hits — all sensitive fields masked. A loguru patcher injects `request_id` into every other log line so the stdout/app log can be grepped by request. Status taxonomy, sampling, and rotation are all configurable; `x-request-id` is echoed on every traced response including 500s. Pure ASGI middleware, composable `SpanExporter` Protocol (`Loguru` / `Sampled` / `Multi` / `Null`), 62 pytest tests.
+
+Enable with `ACCESS_LOG_ENABLED=true`. See [docs/observability.md](docs/observability.md) for configuration, log format, and jq queries.
+
+**Where:** `app/core/observability/`, `app/utils/logger.py`, `tests/test_{span,exporter,middleware,usage_tap}.py`
+
 ### CI/CD & Infrastructure
 
 - **Auto-merge upstream workflow:** Daily (08:00 UTC) automatic merge from Huan-zhaojun/clove, with frontend submodule sync and conflict issue creation on failure. (`.github/workflows/auto-merge-upstream.yml`)
