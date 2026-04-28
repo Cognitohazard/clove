@@ -22,12 +22,6 @@ class NonStreamingResponseProcessor(BaseProcessor):
         Produces:
             - response (JSONResponse) in context
         """
-        if context.response:
-            logger.debug(
-                "Skipping NonStreamingResponseProcessor due to existing response"
-            )
-            return context
-
         if context.messages_api_request and context.messages_api_request.stream is True:
             logger.debug("Skipping NonStreamingResponseProcessor for streaming request")
             return context

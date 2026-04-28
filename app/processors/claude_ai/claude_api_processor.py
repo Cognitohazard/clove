@@ -28,6 +28,7 @@ from app.core.exceptions import (
     ProxyConnectionError,
 )
 from app.core.config import settings
+from app.utils.oauth_headers import build_oauth_headers
 
 
 class ClaudeAPIProcessor(BaseProcessor):
@@ -64,10 +65,6 @@ class ClaudeAPIProcessor(BaseProcessor):
         Produces:
             - response in context (StreamingResponse)
         """
-        if context.response:
-            logger.debug("Skipping ClaudeAPIProcessor due to existing response")
-            return context
-
         if not context.messages_api_request:
             logger.warning(
                 "Skipping ClaudeAPIProcessor due to missing messages_api_request"
@@ -88,12 +85,9 @@ class ClaudeAPIProcessor(BaseProcessor):
                 if account:
                     logger.info(f"Using cached account: {cached_account_id[:8]}...")
 
-            # If no cached account or account not available, get a new one
             if not account:
                 account = await account_manager.get_account_for_oauth(
-                    is_max=True
-                    if (context.messages_api_request.model in settings.max_models)
-                    else None
+                    model=context.messages_api_request.model,
                 )
 
             span = current_span()
@@ -243,8 +237,6 @@ class ClaudeAPIProcessor(BaseProcessor):
                     headers=filtered_headers,
                 )
 
-                # Stop pipeline on success
-                context.metadata["stop_pipeline"] = True
                 logger.info("Successfully processed request via Claude API")
 
                 # Store checkpoints in cache service after successful request
@@ -253,36 +245,41 @@ class ClaudeAPIProcessor(BaseProcessor):
                         checkpoints, account.organization_uuid
                     )
 
-        except (NoAccountsAvailableError, InvalidModelNameError):
-            logger.debug("No accounts available for Claude API, continuing pipeline")
+        except NoAccountsAvailableError:
+            logger.debug("No OAuth accounts available, falling back to Web pipeline")
+        except InvalidModelNameError as e:
+            model_name = e.context.get("model_name") if e.context else None
+            logger.debug(
+                f"OAuth upstream rejected model {model_name!r}, falling back to Web pipeline"
+            )
 
         return context
 
     async def _prepare_request_body(self, context: ClaudeAIContext) -> bytes:
         """Prepare the request body for the Claude API.
 
-        Uses the raw request body to avoid Pydantic round-trip stripping unknown fields.
-        If system prompt injection is enabled, patches the raw JSON directly.
+        Forwards raw bytes by default (transparency). If Claude-Code system
+        prompt injection is enabled, patches the cached raw JSON in-place and
+        re-serialises — no Pydantic round-trip, so unknown upstream fields
+        survive untouched.
         """
-        raw_body = await context.original_request.body()
+        if context.view is None:
+            return await context.original_request.body()
         if not settings.inject_claude_code_system_prompt:
-            return raw_body
+            return context.view.raw_body
 
-        # Patch system prompt in raw JSON without Pydantic
-        data = json.loads(raw_body)
+        data = dict(context.view.raw_json)
         system_block = {"type": "text", "text": self.LEGACY_CLAUDE_CODE_SYSTEM_PROMPT}
-
         system = data.get("system")
         if isinstance(system, str) and system:
             data["system"] = [system_block, {"type": "text", "text": system}]
         elif isinstance(system, list) and system:
             first = system[0]
-            if (
+            already_injected = (
                 isinstance(first, dict)
                 and first.get("text") == self.LEGACY_CLAUDE_CODE_SYSTEM_PROMPT
-            ):
-                pass  # Already present
-            else:
+            )
+            if not already_injected:
                 data["system"] = [system_block] + system
         else:
             data["system"] = [system_block]
@@ -295,27 +292,11 @@ class ClaudeAPIProcessor(BaseProcessor):
         request: MessagesAPIRequest,
         original_request=None,
     ) -> Dict[str, str]:
-        """Prepare headers for Claude API request.
-
-        Beta headers: oauth 是 OAuth 认证必需的。
-        effort 和 structured-outputs 已 GA，不再需要 beta header。
-        客户端的 anthropic-beta header 会被透传（去重合并）。
-        """
-        # oauth beta 是 OAuth 认证必需的。
-        beta_features = ["oauth-2025-04-20"]
-
-        # 透传客户端 anthropic-beta header，与内部 beta 去重合并
-        if original_request:
-            client_beta = original_request.headers.get("anthropic-beta", "")
-            if client_beta:
-                for beta in client_beta.split(","):
-                    beta = beta.strip()
-                    if beta and beta not in beta_features:
-                        beta_features.append(beta)
-
-        return {
-            "Authorization": f"Bearer {access_token}",
-            "anthropic-beta": ",".join(beta_features),
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        }
+        client_beta = (
+            original_request.headers.get("anthropic-beta") if original_request else None
+        )
+        return build_oauth_headers(
+            access_token,
+            client_beta_header=client_beta,
+            content_type="application/json",
+        )

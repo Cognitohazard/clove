@@ -145,7 +145,50 @@ class AccountManager:
         if auth_type == AuthType.COOKIE_ONLY:
             asyncio.create_task(self._attempt_oauth_authentication(account))
 
+        if oauth_token:
+            asyncio.create_task(self._discover_account_models(account))
+
         return account
+
+    # If we discovered models within this window, don't re-query upstream.
+    # 6h trades off "operator just granted access to a new model" against
+    # "background task hits /v1/models for every account every refresh tick".
+    _MODEL_DISCOVERY_TTL = timedelta(hours=6)
+
+    def _models_discovery_is_fresh(self, account: Account) -> bool:
+        if account.available_models_fetched_at is None:
+            return False
+        age = datetime.now(UTC) - account.available_models_fetched_at.astimezone(UTC)
+        return age < self._MODEL_DISCOVERY_TTL
+
+    async def _discover_account_models(self, account: Account) -> None:
+        """Best-effort background task to populate ``account.available_models``.
+
+        Failures are silent — the static MAX_MODELS heuristic stays in place
+        until upstream is reachable. Eventually the periodic refresh task will
+        retry.
+        """
+        if self._models_discovery_is_fresh(account):
+            return
+        try:
+            models = await oauth_authenticator.fetch_available_models(account)
+        except Exception as exc:
+            logger.debug(
+                f"Model discovery for {account.organization_uuid[:8]}... failed: {exc}"
+            )
+            return
+        if models is None:
+            return
+
+        account.available_models_fetched_at = datetime.now(UTC)
+        if models == account.available_models:
+            return  # no change → no disk write
+        account.available_models = models
+        self.save_accounts()
+        logger.debug(
+            f"Discovered {len(models)} available models for "
+            f"{account.organization_uuid[:8]}..."
+        )
 
     # 仅从内存中移除账户，不持久化到磁盘
     def _remove_account_from_memory(self, organization_uuid: str) -> None:
@@ -287,47 +330,54 @@ class AccountManager:
 
     async def get_account_for_oauth(
         self,
-        is_pro: Optional[bool] = None,
-        is_max: Optional[bool] = None,
+        model: Optional[str] = None,
     ) -> Account:
-        """
-        Get an available account for OAuth authentication.
+        """Get an available OAuth account, optionally filtered to one that serves ``model``.
 
-        Args:
-            is_pro: Filter by pro capability. None means any.
-            is_max: Filter by max capability. None means any.
+        Selection has two tiers when ``model`` is given:
+          * Confirmed pool — accounts whose upstream-discovered model list
+            contains ``model``.
+          * Unknown pool — accounts that haven't been discovered yet AND, for
+            models in ``settings.max_models``, are flagged as max-tier by their
+            cookie-side capabilities (the heuristic floor).
 
-        Returns:
-            Account instance if available
+        The unknown pool only kicks in when the confirmed pool is empty, so a
+        proxy where discovery has finished routes deterministically; one where
+        it hasn't keeps serving via the heuristic.
         """
-        earliest_account = None
-        earliest_last_used = None
+        confirmed: List[Account] = []
+        unknown: List[Account] = []
+        requires_max = bool(model) and model in settings.max_models
 
         for account in self._accounts.values():
             if account.status != AccountStatus.VALID:
                 continue
-
-            if account.auth_type not in [AuthType.OAUTH_ONLY, AuthType.BOTH]:
+            if account.auth_type not in (AuthType.OAUTH_ONLY, AuthType.BOTH):
                 continue
 
-            # Filter by capabilities if specified
-            if is_pro is not None and account.is_pro != is_pro:
-                continue
-            if is_max is not None and account.is_max != is_max:
+            if model is None:
+                confirmed.append(account)
                 continue
 
-            if earliest_last_used is None or account.last_used < earliest_last_used:
-                earliest_last_used = account.last_used
-                earliest_account = account
+            serves = account.can_serve_model(model)
+            if serves is True:
+                confirmed.append(account)
+            elif serves is None and (not requires_max or account.is_max):
+                unknown.append(account)
+            # serves is False, or unknown account that can't satisfy max
+            # requirement: skip.
 
-        if earliest_account:
-            logger.debug(
-                f"Selected OAuth account: {earliest_account.organization_uuid[:8]}... "
-                f"(last used: {earliest_account.last_used.isoformat()})"
-            )
-            return earliest_account
+        pool = confirmed or unknown
+        chosen = min(pool, key=lambda a: a.last_used, default=None)
+        if chosen is None:
+            raise NoAccountsAvailableError()
 
-        raise NoAccountsAvailableError()
+        logger.debug(
+            f"Selected OAuth account: {chosen.organization_uuid[:8]}... "
+            f"(last_used={chosen.last_used.isoformat()}, "
+            f"models_known={chosen.available_models is not None})"
+        )
+        return chosen
 
     async def get_account_by_id(self, account_id: str) -> Optional[Account]:
         """
@@ -721,6 +771,7 @@ class AccountManager:
                 cookie_valid = None
 
         # 锁外: OAuth 刷新（如有 OAuth token）
+        new_available_models: Optional[List[str]] = None
         if (
             account.auth_type in (AuthType.OAUTH_ONLY, AuthType.BOTH)
             and account.oauth_token
@@ -731,6 +782,11 @@ class AccountManager:
             except Exception as e:
                 logger.warning(
                     f"OAuth refresh failed for {organization_uuid[:8]}...: {e}"
+                )
+
+            if not self._models_discovery_is_fresh(account):
+                new_available_models = await oauth_authenticator.fetch_available_models(
+                    account
                 )
 
         # Phase 2 (锁外): 限流探测（仅 RATE_LIMITED + Cookie 有效时）
@@ -774,6 +830,11 @@ class AccountManager:
                 elif cookie_valid is True and new_capabilities:
                     account.capabilities = new_capabilities
                 # cookie_valid None: 不变
+
+            if new_available_models is not None:
+                account.available_models_fetched_at = datetime.now(UTC)
+                if new_available_models != account.available_models:
+                    account.available_models = new_available_models
 
             self.save_accounts()
 

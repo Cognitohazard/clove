@@ -10,33 +10,22 @@ from app.dependencies.auth import AuthDep
 from app.core.exceptions import NoAccountsAvailableError, ProxyConnectionError
 from app.services.account import account_manager
 from app.services.proxy import proxy_service
+from app.utils.oauth_headers import build_oauth_headers
 
 
 router = APIRouter()
 
 
 def _prepare_headers(access_token: str, original_request: Request) -> dict[str, str]:
-    beta_features = ["oauth-2025-04-20"]
-    client_beta = original_request.headers.get("anthropic-beta", "")
-    if client_beta:
-        for beta in client_beta.split(","):
-            beta = beta.strip()
-            if beta and beta not in beta_features:
-                beta_features.append(beta)
-
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "anthropic-beta": ",".join(beta_features),
-        "anthropic-version": original_request.headers.get(
-            "anthropic-version", "2023-06-01"
-        ),
-        "Accept": "application/json",
-    }
-
+    headers = build_oauth_headers(
+        access_token,
+        client_beta_header=original_request.headers.get("anthropic-beta"),
+        anthropic_version=original_request.headers.get("anthropic-version"),
+        accept="application/json",
+    )
     request_id = original_request.headers.get("anthropic-request-id")
     if request_id:
         headers["anthropic-request-id"] = request_id
-
     return headers
 
 

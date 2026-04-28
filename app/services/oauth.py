@@ -24,6 +24,7 @@ from app.core.exceptions import (
     ProxyConnectionError,
 )
 from app.services.proxy import proxy_service
+from app.utils.oauth_headers import build_oauth_headers
 from app.utils.retry import is_retryable_error, log_before_sleep
 
 
@@ -484,6 +485,67 @@ class OAuthAuthenticator:
             f"Successfully refreshed OAuth token for account: {account.organization_uuid[:8]}..."
         )
         return RefreshResult.SUCCESS
+
+    async def fetch_available_models(self, account: Account) -> Optional[List[str]]:
+        """Query upstream /v1/models to discover the model IDs this OAuth account can serve.
+
+        Returns:
+            A list of model IDs on success, or ``None`` on any failure (network,
+            auth, parse). The caller treats ``None`` as "leave the existing
+            cached value alone" so a transient outage doesn't wipe knowledge.
+        """
+        if not account.oauth_token or not account.oauth_token.access_token:
+            return None
+
+        url = settings.claude_api_baseurl.encoded_string().rstrip("/") + "/v1/models"
+        proxy_url = await proxy_service.get_proxy(account_id=account.organization_uuid)
+        session = create_session(
+            timeout=settings.request_timeout,
+            impersonate="chrome",
+            proxy=proxy_url,
+            follow_redirects=False,
+        )
+
+        try:
+            async with session:
+                response = await session.request(
+                    method="GET",
+                    url=url,
+                    headers=build_oauth_headers(
+                        account.oauth_token.access_token,
+                        accept="application/json",
+                    ),
+                    params={"limit": "1000"},
+                )
+                if response.status_code != 200:
+                    logger.debug(
+                        f"Model discovery for {account.organization_uuid[:8]}... "
+                        f"got HTTP {response.status_code}; keeping cached list"
+                    )
+                    return None
+                data = await response.json()
+        except ProxyNetworkException as exc:
+            if proxy_url:
+                await proxy_service.mark_unhealthy(
+                    proxy_url, reason=f"connection error: {type(exc).__name__}"
+                )
+            return None
+        except Exception as exc:
+            logger.debug(
+                f"Model discovery for {account.organization_uuid[:8]}... failed: {exc}"
+            )
+            return None
+
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return None
+
+        model_ids = [
+            item["id"]
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        ]
+        return model_ids or None
 
 
 oauth_authenticator = OAuthAuthenticator()

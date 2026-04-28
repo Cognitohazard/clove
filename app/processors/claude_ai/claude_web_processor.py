@@ -66,10 +66,6 @@ class ClaudeWebProcessor(BaseProcessor):
             - claude_web_request in context
             - original_stream in context
         """
-        if context.original_stream:
-            logger.debug("Skipping ClaudeWebProcessor due to existing original_stream")
-            return context
-
         if not context.messages_api_request:
             logger.warning(
                 "Skipping ClaudeWebProcessor due to missing messages_api_request"

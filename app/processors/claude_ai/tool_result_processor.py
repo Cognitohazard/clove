@@ -114,10 +114,4 @@ class ToolResultProcessor(BaseProcessor):
 
         tool_call_manager.complete_tool_call(tool_result.tool_use_id)
 
-        # Skip the normal Claude AI processor
-        context.metadata["skip_processors"] = [
-            "ClaudeAPIProcessor",
-            "ClaudeWebProcessor",
-        ]
-
         return context

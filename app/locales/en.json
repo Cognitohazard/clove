@@ -27,6 +27,7 @@
   },
   "messageProcessor": {
     "noValidMessages": "No valid messages found in the request.",
+    "malformedRequestBody": "Request body is malformed: {detail}",
     "externalImageDownloadError": "Failed to download external image from: {url}",
     "externalImageNotAllowed": "External images are not allowed: {url}",
     "tooManyFiles": "File count ({count}) exceeds Claude.ai limit (max {limit})."

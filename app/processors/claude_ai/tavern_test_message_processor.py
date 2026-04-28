@@ -68,8 +68,6 @@ class TestMessageProcessor(BaseProcessor):
             context.response = JSONResponse(
                 content=response.model_dump(), status_code=200
             )
-
-            context.metadata["stop_pipeline"] = True
             return context
 
         return context

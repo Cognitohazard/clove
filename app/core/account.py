@@ -59,6 +59,8 @@ class Account:
         cookie_value: Optional[str] = None,
         oauth_token: Optional[OAuthToken] = None,
         auth_type: AuthType = AuthType.COOKIE_ONLY,
+        available_models: Optional[List[str]] = None,
+        available_models_fetched_at: Optional[datetime] = None,
     ):
         self.organization_uuid = organization_uuid
         self.capabilities = capabilities
@@ -68,11 +70,27 @@ class Account:
         self.last_used = datetime.now()
         self.resets_at: Optional[datetime] = None
         self.oauth_token: Optional[OAuthToken] = oauth_token
+        self.available_models: Optional[List[str]] = available_models
+        self.available_models_fetched_at: Optional[datetime] = (
+            available_models_fetched_at
+        )
 
         # Transient runtime fields for OAuth refresh backoff (not persisted)
         self.refresh_fail_count: int = 0
         self.refresh_retry_after: Optional[datetime] = None
         self.is_refreshing: bool = False
+
+    def can_serve_model(self, model: str) -> Optional[bool]:
+        """Whether this account is known to be able to serve ``model``.
+
+        Returns:
+            True/False if we have authoritative knowledge from upstream's
+            /v1/models response. ``None`` if we haven't discovered yet —
+            callers should fall back to the static heuristic.
+        """
+        if self.available_models is None:
+            return None
+        return model in self.available_models
 
     def __enter__(self) -> "Account":
         """Enter the context manager."""
@@ -127,16 +145,27 @@ class Account:
             "last_used": self.last_used.isoformat(),
             "resets_at": self.resets_at.isoformat() if self.resets_at else None,
             "oauth_token": self.oauth_token.to_dict() if self.oauth_token else None,
+            "available_models": self.available_models,
+            "available_models_fetched_at": (
+                self.available_models_fetched_at.isoformat()
+                if self.available_models_fetched_at
+                else None
+            ),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "Account":
         """Create Account from dictionary."""
+        fetched_at_raw = data.get("available_models_fetched_at")
         account = cls(
             organization_uuid=data["organization_uuid"],
             capabilities=data.get("capabilities"),
             cookie_value=data.get("cookie_value"),
             auth_type=AuthType(data["auth_type"]),
+            available_models=data.get("available_models"),
+            available_models_fetched_at=(
+                datetime.fromisoformat(fetched_at_raw) if fetched_at_raw else None
+            ),
         )
         account.status = AccountStatus(data["status"])
         account.last_used = datetime.fromisoformat(data["last_used"])

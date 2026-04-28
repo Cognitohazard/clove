@@ -24,7 +24,7 @@ class ImageType(str, Enum):
 # Image sources
 class Base64ImageSource(BaseModel):
     type: Literal["base64"] = "base64"
-    media_type: ImageType = Field(..., description="MIME type of the image")
+    media_type: str = Field(..., description="MIME type of the image")
     data: str = Field(..., description="Base64 encoded image data")
 
 
@@ -50,7 +50,7 @@ class WebSearchResult(BaseModel):
 # Cache control
 class CacheControl(BaseModel):
     type: Literal["ephemeral"]
-    ttl: Optional[Literal["5m", "1h"]] = None
+    ttl: Optional[str] = None
 
 
 # Content types
@@ -137,12 +137,13 @@ class InputMessage(BaseModel):
 
 
 class ThinkingOptions(BaseModel):
-    type: Literal["enabled", "disabled", "adaptive"] = "disabled"
+    type: str = "disabled"
     budget_tokens: Optional[int] = None
+    display: Optional[str] = None
 
 
 class ToolChoice(BaseModel):
-    type: Literal["auto", "any", "tool", "none"] = "auto"
+    type: str = "auto"
     name: Optional[str] = None
     disable_parallel_tool_use: Optional[bool] = None
 
@@ -158,7 +159,7 @@ class Tool(BaseModel):
 class OutputConfig(BaseModel):
     """Output configuration (effort, format, etc). effort and structured outputs are now GA."""
 
-    effort: Optional[Literal["low", "medium", "high", "max"]] = None
+    effort: Optional[str] = None
 
 
 class OutputFormat(BaseModel):
@@ -186,8 +187,8 @@ class MessagesAPIRequest(BaseModel):
     messages: List[InputMessage]
     max_tokens: int = Field(default=8192, ge=1)
     system: Optional[str | List[TextContent]] = None
-    temperature: Optional[float] = Field(default=None, ge=0, le=1)
-    top_p: Optional[float] = Field(default=None, ge=0, le=1)
+    temperature: Optional[float] = Field(default=None, ge=0)
+    top_p: Optional[float] = Field(default=None, ge=0)
     top_k: Optional[int] = Field(default=None, ge=0)
     stop_sequences: Optional[List[str]] = None
     stream: Optional[bool] = False
@@ -217,16 +218,6 @@ class Message(BaseModel):
     role: Literal["assistant"]
     content: List[ContentBlock]
     model: str
-    stop_reason: Optional[
-        Literal[
-            "end_turn",
-            "max_tokens",
-            "model_context_window_exceeded",
-            "stop_sequence",
-            "tool_use",
-            "pause_turn",
-            "refusal",
-        ]
-    ] = None
+    stop_reason: Optional[str] = None
     stop_sequence: Optional[str] = None
     usage: Optional[Usage] = None

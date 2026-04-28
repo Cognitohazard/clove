@@ -115,30 +115,43 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 
 ```text
 客户端请求
-  -> POST /v1/messages
-  -> ClaudeAIPipeline (app/processors/claude_ai/pipeline.py)
-  -> 处理器链
+  -> POST /v1/messages (app/api/routes/claude.py)
+     接收 raw Request；自己读 body、构造 MessagesRequestView，
+     再用宽松的 MessagesAPIRequest 解析
+  -> MessagesHandler (app/handlers/messages_handler.py)
+     三阶段：pre-handlers / 策略 / post-chain
   -> OAuth API 响应或 Web 链路 SSE 转换响应
 ```
 
-## 处理器管道
+## MessagesRequestView
 
-请求处理采用管道模式，处理器顺序定义在 `app/processors/claude_ai/pipeline.py`：
+`app/views/messages_view.py` 是请求体的两层视图：
 
-1. `TestMessageProcessor` - 处理 SillyTavern 测试消息
-2. `ToolResultProcessor` - 处理工具调用结果
-3. `ClaudeAPIProcessor` - OAuth API 链路，优先直接代理到 Anthropic API
-4. `ClaudeWebProcessor` - Claude.ai Web 链路回退
-5. `EventParsingProcessor` - 解析 Claude.ai SSE 事件
-6. `ModelInjectorProcessor` - 注入模型信息
-7. `StopSequencesProcessor` - 处理停止序列
-8. `ToolCallEventProcessor` - 处理工具调用事件
-9. `MessageCollectorProcessor` - 收集消息内容
-10. `TokenCounterProcessor` - 估算 token 用量
-11. `StreamingResponseProcessor` - 格式化流式响应
-12. `NonStreamingResponseProcessor` - 格式化非流式响应
+- 廉价访问器（`model` / `stream` / `messages` / `system` / `stop_sequences` / `raw_json` / `raw_body`）只读 raw JSON，**不会触发 Pydantic 解析**。OAuth 透明代理路径只用这些字段
+- `view.parsed` 才会调用 `MessagesAPIRequest.model_validate`，专供 Web 路径访问 `thinking` / `tools` / `tool_choice` 等结构化字段
+- 路由层捕获 `ValidationError` 并抛 `MalformedRequestBodyError`（400），不让 FastAPI 在边界 422 上游合法的形状
 
-`ClaudeAIContext` 在管道中传递请求、会话、原始流、响应和元数据。
+## MessagesHandler 三阶段
+
+`app/handlers/messages_handler.py` 替代旧的 `ClaudeAIPipeline`，把控制流写成显式阶段而不是 `stop_pipeline` / `skip_processors` 标志：
+
+1. **Pre-handlers**
+   - `TestMessageProcessor` 处理 SillyTavern 测试消息（可能直接产生 canned 响应）
+   - `ToolResultProcessor` 处理工具调用恢复（可能播种 `original_stream`）
+2. **策略选择**（仅当上一阶段没有产出 response 也没有 original_stream 时执行）
+   - `ClaudeAPIProcessor` —— OAuth 透明代理路径，成功即直接产出 `StreamingResponse`
+   - `ClaudeWebProcessor` —— Claude.ai Web 回退路径，构建 SSE 流
+3. **Post-chain**（仅当 `original_stream` 存在时执行）
+   - `EventParsingProcessor` 解析 Claude.ai SSE 事件
+   - `ModelInjectorProcessor` 注入模型信息
+   - `StopSequencesProcessor` 处理停止序列
+   - `ToolCallEventProcessor` 处理工具调用事件
+   - `MessageCollectorProcessor` 收集消息内容
+   - `TokenCounterProcessor` 估算 token 用量
+   - `StreamingResponseProcessor` 格式化流式响应
+   - `NonStreamingResponseProcessor` 格式化非流式响应
+
+`ClaudeAIContext` 在阶段间传递 view、解析后的请求、会话、原始流、响应和元数据。处理器内部不再写 `stop_pipeline`，也不需要防御性的 `if context.response: return context`。
 
 ## OAuth API 链路要点
 
@@ -147,6 +160,7 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 - OAuth 链路优先执行，成功后设置 `context.metadata["stop_pipeline"] = True`
 - 直接使用原始 request body 转发，避免 Pydantic round-trip 丢失未知字段
 - `BaseModel` 默认 `extra="allow"`，新 Anthropic 字段应尽量透明透传
+- `MessagesAPIRequest` 内的字段已尽量去掉 `Literal` / 数值上界（`effort`、`thinking.type`、`tool_choice.type`、`cache_control.ttl`、`temperature`、`top_p`、`media_type` 等），避免 FastAPI 在路由层对上游合法值返回 422。新增上游枚举值时无需再改这里
 - 默认会注入 legacy Claude Code system prompt，可通过 `INJECT_CLAUDE_CODE_SYSTEM_PROMPT=false` 关闭
 - `anthropic-beta` 会合并内部 `oauth-2025-04-20` 与客户端传入值
 - `invalid_request_error` 被视为不可重试错误
@@ -200,7 +214,7 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 
 | 服务 | 文件 | 用途 |
 |------|------|------|
-| `account_manager` | `app/services/account.py` | 账户生命周期、负载均衡、状态恢复、OAuth token 刷新 |
+| `account_manager` | `app/services/account.py` | 账户生命周期、负载均衡、状态恢复、OAuth token 刷新、按 model 选择账户 |
 | `session_manager` | `app/services/session.py` | Claude.ai Web 会话管理 |
 | `tool_call_manager` | `app/services/tool_call.py` | 待处理工具调用追踪 |
 | `cache_service` | `app/services/cache.py` | 响应缓存与 checkpoint/account 绑定 |
@@ -210,6 +224,8 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 | `event_processing` | `app/services/event_processing/` | SSE 事件解析与序列化 |
 
 账户模型支持 `cookie_only`、`oauth_only`、`both` 三种认证类型。OAuth refresh 对临时失败有退避保护，达到最大重试次数后才会降级或标记账号失效。
+
+`Account.available_models` 缓存上游 `/v1/models` 返回的模型列表。`add_account` 时后台 best-effort 拉取一次，之后 `refresh_account_status` 周期性更新；任何失败都保留现有缓存而非清零。`get_account_for_oauth(model=...)` 优先匹配 `can_serve_model(model) is True` 的账户，未发现的账户作为 fallback；`MAX_MODELS` 静态列表仍是 capabilities 不明时的兜底信号。
 
 # API 路由
 
@@ -264,7 +280,7 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 - `INJECT_CLAUDE_CODE_SYSTEM_PROMPT`
 - `PROXY_URL` 旧固定代理配置，启动时会迁移到新 `proxy` 配置
 - `NO_FILESYSTEM_MODE` 会禁用文件读写，账户和配置只保存在内存中
-- `MAX_MODELS` 默认包含 `claude-opus-4-6`，用于选择 Max 账户
+- `MAX_MODELS` 默认包含 `claude-opus-4-6` 与 `claude-opus-4-7`，用于选择 Max 账户
 - `ACCESS_LOG_ENABLED`（默认 `false`）开启结构化请求访问日志
 - `ACCESS_LOG_PATH`（默认 `logs/access.log`）访问日志路径
 - `ACCESS_LOG_ROTATION`（默认 `100 MB`）/ `ACCESS_LOG_RETENTION`（默认 `14 days`）轮转与保留

@@ -164,6 +164,28 @@ class NoValidMessagesError(AppError):
         )
 
 
+class MalformedRequestBodyError(AppError):
+    """Request body could not be parsed as JSON or violated structural invariants.
+
+    Distinct from FastAPI's automatic 422 — this is raised by our handler so
+    we control the error shape. Use only for shape-level invariants we *want*
+    to enforce (missing ``messages``, malformed JSON), not for upstream-valid
+    fields the proxy should pass through transparently.
+    """
+
+    def __init__(
+        self, detail: str, context: Optional[Dict[str, Any]] = None
+    ):
+        _context = context.copy() if context else {}
+        _context["detail"] = detail
+        super().__init__(
+            error_code=400141,
+            message_key="messageProcessor.malformedRequestBody",
+            status_code=400,
+            context=_context,
+        )
+
+
 class ExternalImageDownloadError(AppError):
     def __init__(self, url: str, context: Optional[Dict[str, Any]] = None):
         _context = context.copy() if context else {}
