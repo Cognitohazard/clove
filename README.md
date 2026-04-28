@@ -48,9 +48,33 @@ Shared HTTP sessions still support configurable transport retries through `REQUE
 
 ### OAuth Beta Header Passthrough
 
-OAuth Messages and Models proxy requests inject the required `oauth-2025-04-20` beta header and merge any client-provided `anthropic-beta` values without duplicating entries. Optional betas such as `context-1m-2025-08-07` should be supplied by the client when needed instead of being forced globally by the proxy.
+OAuth Messages and Models proxy requests inject the required `oauth-2025-04-20` beta header and merge any client-provided `anthropic-beta` values without duplicating entries. Optional betas such as `context-1m-2025-08-07` should be supplied by the client when needed instead of being forced globally by the proxy. The header set is built by a single shared helper (`build_oauth_headers`) so the messages route, models route, and account model discovery never drift out of sync.
 
-**Where:** `app/processors/claude_ai/claude_api_processor.py`, `app/api/routes/models.py`
+**Where:** `app/utils/oauth_headers.py`, `app/processors/claude_ai/claude_api_processor.py`, `app/api/routes/models.py`
+
+### Messages API Field Transparency
+
+The route stops 422-rejecting upstream-valid request shapes. Effort levels (`xhigh`, plus any future value), cache control TTLs, thinking type and `display`, tool_choice type, image media types, temperature/top_p above 1, and response stop reasons are all permissive — Pydantic still validates structure (`messages` is a list, `max_tokens >= 1`) but never rejects a value that the live Anthropic API accepts. New top-level fields like `service_tier`, `inference_geo`, and `container` flow through via `extra="allow"`.
+
+When a request body is genuinely malformed, the proxy returns `400 MalformedRequestBodyError` with an i18n message, not FastAPI's auto-422.
+
+A 30-fixture contract test suite pins the request shapes upstream documents (including future-value canaries) so the next API addition doesn't quietly start failing.
+
+**Where:** `app/models/claude.py`, `app/views/messages_view.py`, `app/api/routes/claude.py`, `app/core/exceptions.py`, `tests/test_messages_request_contract.py`
+
+### Explicit-Phase Messages Handler
+
+The `/v1/messages` flow used to be a flat 12-processor pipeline glued together with `stop_pipeline` and `skip_processors` flags, plus defensive `if context.response: return context` guards in every processor. It's now a `MessagesHandler` with three named phases — pre-handlers (tavern test, tool-result resumption), strategy (OAuth → Web fallback), and a post-chain that only runs when there's an SSE stream to translate. Control flow is in one file; processors no longer carry orchestration logic.
+
+`MessagesRequestView` provides cheap raw-JSON accessors plus an opt-in parsed model so the OAuth raw-body passthrough doesn't pay for typed access it doesn't need.
+
+**Where:** `app/handlers/messages_handler.py`, `app/views/messages_view.py`, `app/processors/claude_ai/`
+
+### Per-Account Model Discovery
+
+`MAX_MODELS` was a hand-curated config list that drifted every time Anthropic shipped a new Opus. Each OAuth account now has its `/v1/models` list discovered lazily on attach and re-checked on the periodic refresh task (with a 6h TTL so it doesn't hammer upstream). `get_account_for_oauth(model=...)` prefers accounts whose discovered list confirms support; the static `MAX_MODELS` heuristic stays as a fallback for accounts where discovery hasn't completed yet. New models route automatically as soon as Anthropic grants access — no config change required.
+
+**Where:** `app/core/account.py`, `app/services/account.py`, `app/services/oauth.py`
 
 ### 1-Hour Cache TTL
 
