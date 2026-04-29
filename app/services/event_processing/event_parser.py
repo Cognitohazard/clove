@@ -41,10 +41,9 @@ class EventParser:
             self.buffer += chunk
 
             async for event in self._process_buffer():
-                # Defer model_dump(): on the OAuth SSE usage-tap path this log
-                # fires once per event; eagerly serializing is hot-path waste
-                # when DEBUG is off.
-                logger.opt(lazy=True).debug(
+                # TRACE, not DEBUG: this fires once per SSE event on every
+                # streaming request via the OAuth usage tap.
+                logger.opt(lazy=True).trace(
                     "Parsed event:\n{}", lambda ev=event: ev.model_dump()
                 )
                 yield event
@@ -61,8 +60,8 @@ class EventParser:
 
             sse_msg = self._parse_sse_message(message_text)
 
-            if sse_msg.data:
-                event = self._create_streaming_event(sse_msg)
+            if sse_msg.data is not None:
+                event = self._create_streaming_event(sse_msg.event, sse_msg.data)
                 if event:
                     yield event
 
@@ -92,22 +91,16 @@ class EventParser:
 
         return sse_msg
 
-    def _create_streaming_event(self, sse_msg: SSEMessage) -> Optional[StreamingEvent]:
-        """
-        Create a StreamingEvent from an SSE message.
-
-        Args:
-            sse_msg: The parsed SSE message
-
-        Returns:
-            StreamingEvent object or None if parsing fails
-        """
+    def _create_streaming_event(
+        self, event_name: Optional[str], raw_data: str
+    ) -> Optional[StreamingEvent]:
+        """Create a StreamingEvent from an SSE event name and JSON payload."""
         try:
-            data = json.loads(sse_msg.data)
+            data = json.loads(raw_data)
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON data: {e}")
-            logger.debug(f"Raw data: {sse_msg.data}")
+            logger.debug(f"Raw data: {raw_data}")
             return None
 
         data = self._normalize_private_event(data)
@@ -115,17 +108,17 @@ class EventParser:
             return None
 
         try:
-            streaming_event = StreamingEvent(root=data)
+            streaming_event = StreamingEvent.model_validate(data)
         except ValidationError:
             if self.skip_unknown_events:
-                logger.debug(f"Skipping unknown event: {sse_msg.event}")
+                logger.debug(f"Skipping unknown event: {event_name}")
                 return None
             logger.debug(
-                f"Unknown/unmodeled streaming event '{sse_msg.event}', falling back to UnknownEvent."
+                f"Unknown/unmodeled streaming event '{event_name}', falling back to UnknownEvent."
             )
             logger.debug(f"Event data: {data}")
             streaming_event = StreamingEvent(
-                root=UnknownEvent(type=sse_msg.event, data=data)
+                root=UnknownEvent(type=event_name or "unknown", data=data)
             )
 
         return streaming_event

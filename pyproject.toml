@@ -58,6 +58,12 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+include = ["app", "tests"]
+pythonVersion = "3.11"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
