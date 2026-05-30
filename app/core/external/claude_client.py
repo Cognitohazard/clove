@@ -57,7 +57,12 @@ class ClaudeWebClient:
     def _build_headers(
         self, cookie: str, conv_uuid: Optional[str] = None
     ) -> Dict[str, str]:
-        """Build request headers."""
+        """Build request headers.
+
+        Deliberately no User-Agent: the rnet Chrome emulation
+        (impersonate="chrome") supplies one that matches the TLS fingerprint.
+        Don't hardcode a UA here — it would drift from the emulation's JA3.
+        """
         headers = {
             "Accept": "text/event-stream",
             "Accept-Language": "en-US,en;q=0.9",
@@ -65,7 +70,6 @@ class ClaudeWebClient:
             "Cookie": cookie,
             "Origin": self.endpoint,
             "Referer": f"{self.endpoint}/new",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         }
 
         if conv_uuid:

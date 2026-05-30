@@ -280,7 +280,7 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 - `INJECT_CLAUDE_CODE_SYSTEM_PROMPT`
 - `PROXY_URL` 旧固定代理配置，启动时会迁移到新 `proxy` 配置
 - `NO_FILESYSTEM_MODE` 会禁用文件读写，账户和配置只保存在内存中
-- `MAX_MODELS` 默认包含 `claude-opus-4-6` 与 `claude-opus-4-7`，用于选择 Max 账户
+- `MAX_MODELS` 默认包含 `claude-opus-4-6`、`claude-opus-4-7` 与 `claude-opus-4-8`，用于选择 Max 账户
 - `ACCESS_LOG_ENABLED`（默认 `false`）开启结构化请求访问日志
 - `ACCESS_LOG_PATH`（默认 `logs/access.log`）访问日志路径
 - `ACCESS_LOG_ROTATION`（默认 `100 MB`）/ `ACCESS_LOG_RETENTION`（默认 `14 days`）轮转与保留

@@ -52,7 +52,14 @@ class OAuthAuthenticator:
         return verifier, challenge
 
     def _build_headers(self, cookie: str) -> Dict[str, str]:
-        """Build request headers."""
+        """Build request headers for browser-impersonating claude.ai calls.
+
+        Deliberately no User-Agent: the rnet Chrome emulation
+        (impersonate="chrome") supplies one that matches the TLS fingerprint.
+        Don't hardcode a UA here — it would drift from the emulation's JA3.
+        (The token endpoint in ``_plain_request`` uses a plain session and
+        intentionally sets its own claude-cli UA.)
+        """
         claude_endpoint = settings.claude_ai_url.encoded_string().rstrip("/")
 
         return {
@@ -62,7 +69,6 @@ class OAuthAuthenticator:
             "Cookie": cookie,
             "Origin": claude_endpoint,
             "Referer": f"{claude_endpoint}/new",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         }
 
     @retry(
@@ -179,7 +185,7 @@ class OAuthAuthenticator:
         )
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "claude-cli/2.1.81 (external, cli)",
+            "User-Agent": "claude-cli/2.1.158 (external, cli)",
         }
         async with session:
             try:
