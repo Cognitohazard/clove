@@ -127,4 +127,3 @@ jobs:
           package: clove
           owner: ${{ github.repository_owner }}
           delete-untagged: true
-          keep-n-untagged: 0
