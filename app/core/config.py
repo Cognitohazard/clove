@@ -302,8 +302,14 @@ class Settings(BaseSettings):
         env="OAUTH_AUTHORIZE_URL",
         description="OAuth authorization endpoint URL template",
     )
+    # Anthropic retired console.anthropic.com/v1/oauth/token: it now returns an
+    # app-level 404 not_found_error for every client/body (verified identical
+    # across httpx, curl_cffi, and rnet — NOT a TLS-fingerprint block). The
+    # token exchange now lives on claude.ai, which is also where the org-scoped
+    # authorize step issues the code. Override via OAUTH_TOKEN_URL if it moves
+    # again (api.anthropic.com/v1/oauth/token is the known live fallback).
     oauth_token_url: str = Field(
-        default="https://console.anthropic.com/v1/oauth/token",
+        default="https://claude.ai/v1/oauth/token",
         env="OAUTH_TOKEN_URL",
         description="OAuth token exchange endpoint URL",
     )
@@ -327,6 +333,30 @@ class Settings(BaseSettings):
         """Parse comma-separated string."""
         if isinstance(v, str):
             return [key.strip() for key in v.split(",") if key.strip()]
+        return v
+
+    @field_validator(
+        "claude_ai_url",
+        "claude_api_baseurl",
+        "oauth_client_id",
+        "oauth_authorize_url",
+        "oauth_token_url",
+        "oauth_redirect_uri",
+        mode="before",
+    )
+    def strip_surrounding_quotes(cls, v: Any) -> Any:
+        """Strip stray surrounding quotes/whitespace from URL-ish env values.
+
+        docker-compose list-form env (``- KEY="https://..."``) keeps the quotes
+        as literal characters, so the value becomes ``"https://..."`` — which
+        httpx then rejects with "Request URL is missing an 'http://' or
+        'https://' protocol". Runs in ``before`` mode so it also unquotes
+        ``HttpUrl`` fields prior to URL parsing.
+        """
+        if isinstance(v, str):
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                v = v[1:-1].strip()
         return v
 
 

@@ -198,7 +198,14 @@ async def create_account(account_data: AccountCreate, _: AdminAuthDep):
     account = await account_manager.add_account(
         cookie_value=account_data.cookie_value,
         oauth_token=oauth_token,
-        organization_uuid=str(account_data.organization_uuid),
+        # Keep None as None — str(None) would become the literal "None" string,
+        # which add_account treats as a real UUID (skipping org lookup / new-UUID
+        # generation) and surfaces as an account whose org id is "None".
+        organization_uuid=(
+            str(account_data.organization_uuid)
+            if account_data.organization_uuid is not None
+            else None
+        ),
         capabilities=account_data.capabilities,
     )
 
@@ -301,7 +308,7 @@ async def exchange_oauth_code(exchange_data: OAuthCodeExchange, _: AdminAuthDep)
     )
 
     if not token_data:
-        raise OAuthExchangeError()
+        raise OAuthExchangeError(reason="Token exchange returned no data")
 
     # Create OAuth token object
     oauth_token = OAuthToken(

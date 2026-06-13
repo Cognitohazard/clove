@@ -84,11 +84,21 @@ Cache service recognizes `1h` as a TTL value (resolves to 3600 seconds), in addi
 
 ### OAuth Resilience Fixes
 
-Three fixes to prevent OAuth token loss and unnecessary retries:
+Fixes to prevent OAuth token loss, recover stuck accounts, and avoid unnecessary retries:
 
 - **Transient refresh failure protection:** Exponential backoff (60s/120s/240s, max 3 retries) before treating a refresh failure as permanent. Prevents transient network errors from wiping valid tokens. (`app/services/oauth.py`)
 - **429 retry guard:** Stops aggressive retry stacking on OAuth token endpoint 429 responses. (`app/services/oauth.py`)
-- **Plain HTTP client for token exchange:** Dedicated `create_plain_session()` and `_token_request()` that use a non-impersonating HTTP client (prefers httpx) with form-encoded data and `claude-cli` User-Agent for `console.anthropic.com` OAuth endpoints. Prevents 429s caused by browser TLS fingerprints. Based on upstream mirrorange/clove@156efcd. (`app/core/http_client.py`, `app/services/oauth.py`)
+- **Plain HTTP client for token exchange:** Dedicated `create_plain_session()` and `_token_request()` that use a non-impersonating HTTP client (prefers httpx) with form-encoded data and `claude-cli` User-Agent for the OAuth token endpoint. Prevents 429s caused by browser TLS fingerprints. Based on upstream mirrorange/clove@156efcd. (`app/core/http_client.py`, `app/services/oauth.py`)
+- **Self-healing cookie→OAuth upgrade:** A cookie-only account that couldn't obtain an OAuth token at add-time (e.g. the token endpoint was down), or a `both` account demoted to cookie-only after a permanent refresh failure, is now re-attempted on the manual/batch **refresh** action *and* on the periodic background loop (cooldown-guarded, 10 min). Previously the cookie→OAuth exchange ran only once at add-time, so such accounts stayed permanently cookie-only — invisible to the OAuth-only `/v1/models` proxy — until manually deleted and re-added. (`app/services/account.py`)
+- **Quote-tolerant URL config:** A `before` validator strips stray surrounding quotes/whitespace from the OAuth/Claude URL settings (`oauth_token_url`, `oauth_authorize_url`, `oauth_redirect_uri`, `oauth_client_id`, `claude_ai_url`, `claude_api_baseurl`), so the docker-compose footgun `- OAUTH_TOKEN_URL="https://..."` (compose keeps the quotes literal) no longer yields a malformed URL that fails with "missing 'http://' or 'https://' protocol". (`app/core/config.py`)
+
+### OAuth Token Endpoint Migration (console.anthropic.com → claude.ai)
+
+Anthropic retired the `https://console.anthropic.com/v1/oauth/token` token-exchange endpoint — it now returns an application-level `404 {"type":"not_found_error"}` for every request. This silently broke the cookie→OAuth upgrade (`authenticate_account`) and token refresh: accounts stayed `cookie_only`, and the OAuth-only `/v1/models` proxy then returned `503 NoAccountsAvailableError` even with a valid Max cookie attached.
+
+The default `oauth_token_url` is now `https://claude.ai/v1/oauth/token` — the same host whose org-scoped authorize step (`/v1/oauth/{organization_uuid}/authorize`) already issues the code. Overridable via `OAUTH_TOKEN_URL`; `https://api.anthropic.com/v1/oauth/token` is a known live fallback. Confirmed **not** a TLS-fingerprint problem: httpx, curl_cffi (plain + chrome), and rnet (plain/chrome/safari) all receive the identical 404 from the old host, while claude.ai/api.anthropic.com both respond as live OAuth endpoints. The authorize URL and `oauth_redirect_uri` (the console callback) are unchanged — only the token host moved.
+
+**Where:** `app/core/config.py`
 
 ### Structured Request Observability
 

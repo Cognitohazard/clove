@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 import tempfile
 import threading
 import uuid
@@ -50,8 +51,23 @@ class AccountManager:
         self._account_task_interval = settings.account_task_interval
         # 异步写操作锁，保护账户增删改的并发安全
         self._write_lock = asyncio.Lock()
+        # 限制 cookie → OAuth 升级的全局并发（懒加载，绑定到运行中的事件循环）
+        self._oauth_upgrade_semaphore: Optional[asyncio.Semaphore] = None
 
         logger.info("AccountManager initialized")
+
+    def _upgrade_semaphore(self) -> asyncio.Semaphore:
+        """Lazily-created global limiter shared by every cookie → OAuth upgrade
+        trigger (add, manual/batch refresh, background self-heal).
+
+        Built inside the running loop; the check-then-set is race-free under
+        asyncio's single thread.
+        """
+        if self._oauth_upgrade_semaphore is None:
+            self._oauth_upgrade_semaphore = asyncio.Semaphore(
+                self.MAX_CONCURRENT_OAUTH_UPGRADES
+            )
+        return self._oauth_upgrade_semaphore
 
     # 添加账户（DCL 双重检查锁：慢 I/O 在锁外并行，快操作在锁内串行）
     async def add_account(
@@ -485,10 +501,34 @@ class AccountManager:
                     account.is_refreshing = True
                     asyncio.create_task(self._refresh_account_token(account))
 
+            elif account.needs_oauth_upgrade:
+                # Self-heal: re-attempt the cookie → OAuth upgrade for accounts
+                # stuck as cookie-only (added while the token endpoint was down,
+                # or demoted after an OAuth refresh failure). Cooldown-guarded so
+                # a permanently un-upgradeable account isn't retried every loop.
+                if account.is_refreshing:
+                    continue
+                if (
+                    account.refresh_retry_after
+                    and current_time < account.refresh_retry_after
+                ):
+                    continue
+                account.is_refreshing = True
+                asyncio.create_task(self._upgrade_cookie_only_account(account))
+
     # Max transient refresh failures before treating as permanent
     MAX_REFRESH_RETRIES = 3
     # Base backoff interval (seconds), doubles each failure: 60s → 120s → 240s
     REFRESH_BACKOFF_BASE = 60
+    # Max concurrent cookie → OAuth upgrades across ALL triggers (add, manual
+    # refresh, batch refresh, background self-heal). Bounds upstream load so a
+    # degraded token endpoint or a bulk cookie import can't stampede it.
+    MAX_CONCURRENT_OAUTH_UPGRADES = 3
+    # Cooldown between background cookie → OAuth upgrade attempts (seconds)
+    OAUTH_UPGRADE_RETRY_INTERVAL = 600
+    # Random extra delay (0..N seconds) added to the cooldown so a batch of
+    # failed upgrades doesn't re-synchronize and fire together next window.
+    OAUTH_UPGRADE_RETRY_JITTER = 300
 
     async def _refresh_account_token(self, account: Account) -> None:
         """Refresh OAuth token for an account."""
@@ -545,21 +585,49 @@ class AccountManager:
             )
         self.save_accounts()
 
-    async def _attempt_oauth_authentication(self, account: Account) -> None:
-        """Attempt OAuth authentication for an account."""
+    async def _attempt_oauth_authentication(self, account: Account) -> bool:
+        """Attempt the cookie → OAuth upgrade; return whether it succeeded.
 
-        logger.info(
-            f"Attempting OAuth authentication for account: {account.organization_uuid[:8]}..."
-        )
-
-        success = await oauth_authenticator.authenticate_account(account)
-        if not success:
-            logger.warning(
-                f"OAuth authentication failed for account: {account.organization_uuid[:8]}..., keeping as CookieOnly"
-            )
-        else:
+        Bounded by the global upgrade semaphore (see MAX_CONCURRENT_OAUTH_UPGRADES).
+        """
+        async with self._upgrade_semaphore():
             logger.info(
-                f"OAuth authentication successful for account: {account.organization_uuid[:8]}..."
+                f"Attempting OAuth authentication for account: {account.organization_uuid[:8]}..."
+            )
+
+            success = await oauth_authenticator.authenticate_account(account)
+            if not success:
+                logger.warning(
+                    f"OAuth authentication failed for account: {account.organization_uuid[:8]}..., keeping as CookieOnly"
+                )
+            else:
+                logger.info(
+                    f"OAuth authentication successful for account: {account.organization_uuid[:8]}..."
+                )
+            return success
+
+    async def _upgrade_cookie_only_account(self, account: Account) -> None:
+        """Background self-heal wrapper around the cookie → OAuth upgrade.
+
+        Arms a jittered cooldown (reusing ``refresh_retry_after``) when the
+        upgrade fails so a persistently un-upgradeable account isn't retried on
+        every loop, and so a batch of failures doesn't re-synchronize; clears it
+        on success.
+        """
+        success = False
+        try:
+            success = await self._attempt_oauth_authentication(account)
+        finally:
+            account.is_refreshing = False
+
+        if success:
+            account.refresh_retry_after = None
+        else:
+            cooldown = self.OAUTH_UPGRADE_RETRY_INTERVAL + random.uniform(
+                0, self.OAUTH_UPGRADE_RETRY_JITTER
+            )
+            account.refresh_retry_after = datetime.now(UTC) + timedelta(
+                seconds=cooldown
             )
 
     async def get_status(self) -> Dict:
@@ -788,6 +856,12 @@ class AccountManager:
                 new_available_models = await oauth_authenticator.fetch_available_models(
                     account
                 )
+
+        # 锁外: cookie-only 账户在 cookie 有效时尝试升级为 OAuth。
+        # 自愈 token 端点恢复 / 更换 cookie / OAuth 刷新失败被降级的情况，
+        # 让管理端的「刷新」按钮即可重新拿到 OAuth token，而不必删号重加。
+        if cookie_valid is True and account.needs_oauth_upgrade:
+            await self._attempt_oauth_authentication(account)
 
         # Phase 2 (锁外): 限流探测（仅 RATE_LIMITED + Cookie 有效时）
         probe_result: Optional[str] = None

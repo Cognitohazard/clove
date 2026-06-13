@@ -199,6 +199,19 @@ class Account:
 
         return any("max" in cap.lower() for cap in self.capabilities)
 
+    @property
+    def needs_oauth_upgrade(self) -> bool:
+        """Cookie-only account eligible for a cookie → OAuth token upgrade.
+
+        True when it has a usable cookie but no OAuth token yet (i.e. not
+        already OAuth-capable).
+        """
+        return (
+            self.auth_type == AuthType.COOKIE_ONLY
+            and bool(self.cookie_value)
+            and self.oauth_token is None
+        )
+
     def __repr__(self) -> str:
         """String representation of the Account."""
         return f"<Account organization_uuid={self.organization_uuid[:8]}... status={self.status.value} auth_type={self.auth_type.value}>"
