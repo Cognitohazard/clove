@@ -4,8 +4,8 @@ Clove 是一个 Claude.ai 反向代理，本仓库是 `Cognitohazard/clove` 二�
 
 上游关系：
 
-- `Cognitohazard/clove` fork 自 `Huan-zhaojun/clove`
-- `Huan-zhaojun/clove` fork 自 `mirrorange/clove`
+- `Cognitohazard/clove` 以 `mirrorange/clove` 为直接 upstream（同步原始仓库）
+- 早期通过中间 fork `Huan-zhaojun/clove`（其本身 fork 自 `mirrorange/clove`）同步，其改动已并入本仓库
 - 本 Fork 主要面向 Docker/GHCR 部署，镜像为 `ghcr.io/cognitohazard/clove:latest`
 
 支持两条 Claude 链路：

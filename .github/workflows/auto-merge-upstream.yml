@@ -25,7 +25,7 @@ jobs:
       - name: Add upstream and attempt merge
         id: merge
         run: |
-          git remote add upstream https://github.com/Huan-zhaojun/clove.git
+          git remote add upstream https://github.com/mirrorange/clove.git
           git fetch upstream main
 
           if git merge-base --is-ancestor upstream/main HEAD; then
@@ -77,5 +77,5 @@ jobs:
       - name: Report conflict
         if: steps.merge.outputs.updated == 'conflict'
         run: |
-          echo "::warning title=Upstream merge conflict::Automatic merge of Huan-zhaojun/clove into Cognitohazard/clove failed due to conflicts. Please merge manually."
+          echo "::warning title=Upstream merge conflict::Automatic merge of mirrorange/clove into Cognitohazard/clove failed due to conflicts. Please merge manually."
           exit 1

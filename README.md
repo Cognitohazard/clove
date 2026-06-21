@@ -1,6 +1,6 @@
 # Clove (Cognitohazard Fork)
 
-Fork of [Huan-zhaojun/clove](https://github.com/Huan-zhaojun/clove), which is itself a fork of [mirrorange/clove](https://github.com/mirrorange/clove).
+Fork of [mirrorange/clove](https://github.com/mirrorange/clove). Earlier development tracked the intermediate fork [Huan-zhaojun/clove](https://github.com/Huan-zhaojun/clove) (itself a fork of mirrorange); those changes are already merged in here.
 
 This fork tries to keep the OAuth API path as close to a transparent Anthropic proxy as practical: preserve the original Messages API request body, pass through client API fields and beta headers, and avoid proxy-side behavior that can change upstream semantics.
 
@@ -110,7 +110,7 @@ Enable with `ACCESS_LOG_ENABLED=true`. See [docs/observability.md](docs/observab
 
 ### CI/CD & Infrastructure
 
-- **Auto-merge upstream workflow:** Daily (08:00 UTC) automatic merge from Huan-zhaojun/clove, with frontend submodule sync and conflict issue creation on failure. (`.github/workflows/auto-merge-upstream.yml`)
+- **Auto-merge upstream workflow:** Daily (08:00 UTC) automatic merge from mirrorange/clove, with frontend submodule sync and conflict issue creation on failure. (`.github/workflows/auto-merge-upstream.yml`)
 - **Fork GHCR image:** Docker image published to `ghcr.io/cognitohazard/clove` instead of upstream's registry.
 - **Frontend submodule repointed** to `Cognitohazard/clove-front`.
 - **PyPI publish workflow removed** (this fork is Docker-only).
