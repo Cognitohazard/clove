@@ -1,12 +1,19 @@
 """Account-side support for model-aware OAuth selection.
 
-Covers the data plumbing that lets ``AccountManager.get_account_for_oauth``
-prefer accounts whose discovered ``/v1/models`` list confirms support for the
-requested model, falling back to the static MAX_MODELS heuristic when nothing
-has been discovered yet.
+Covers the data plumbing and routing that let
+``AccountManager.get_account_for_oauth`` serve a model-gated request only from
+accounts whose discovered ``/v1/models`` list confirms support — an undiscovered
+account is not routed model-gated traffic (there is no static model list to
+guess from).
 """
 
+import asyncio
+
+import pytest
+
 from app.core.account import Account, AuthType, AccountStatus, OAuthToken
+from app.core.exceptions import NoAccountsAvailableError
+from app.services.account import AccountManager
 
 
 def _oauth_account(
@@ -24,8 +31,15 @@ def _oauth_account(
     )
 
 
+def _manager(*accounts: Account) -> AccountManager:
+    """A manager with injected accounts, skipping __init__'s file loading."""
+    mgr = AccountManager.__new__(AccountManager)
+    mgr._accounts = {a.organization_uuid: a for a in accounts}
+    return mgr
+
+
 def test_can_serve_model_unknown_returns_none():
-    """No discovery yet -> let callers fall back to static heuristic."""
+    """No discovery yet -> account must not be routed model-gated traffic."""
     account = _oauth_account("uuid1", available_models=None)
     assert account.can_serve_model("claude-opus-4-7") is None
 
@@ -68,3 +82,38 @@ def test_account_round_trips_missing_available_models_as_none():
     blob.pop("available_models", None)  # simulate old format
     restored = Account.from_dict(blob)
     assert restored.available_models is None
+
+
+def test_model_gated_routing_requires_confirmed_support():
+    """Only the discovered account is eligible; the undiscovered one is skipped."""
+    discovered = _oauth_account("disc", available_models=["claude-opus-4-8"])
+    discovered.status = AccountStatus.VALID
+    undiscovered = _oauth_account("undisc", available_models=None)
+    undiscovered.status = AccountStatus.VALID
+
+    chosen = asyncio.run(
+        _manager(discovered, undiscovered).get_account_for_oauth(
+            model="claude-opus-4-8"
+        )
+    )
+    assert chosen.organization_uuid == "disc"
+
+
+def test_undiscovered_account_not_routed_model_gated():
+    """No confirmed account for the model -> raise instead of guessing."""
+    undiscovered = _oauth_account("undisc", available_models=None)
+    undiscovered.status = AccountStatus.VALID
+
+    with pytest.raises(NoAccountsAvailableError):
+        asyncio.run(
+            _manager(undiscovered).get_account_for_oauth(model="claude-opus-4-8")
+        )
+
+
+def test_unmodelled_request_serves_any_valid_account():
+    """model=None has no discovery requirement."""
+    undiscovered = _oauth_account("undisc", available_models=None)
+    undiscovered.status = AccountStatus.VALID
+
+    chosen = asyncio.run(_manager(undiscovered).get_account_for_oauth())
+    assert chosen.organization_uuid == "undisc"

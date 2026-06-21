@@ -72,7 +72,7 @@ The `/v1/messages` flow used to be a flat 12-processor pipeline glued together w
 
 ### Per-Account Model Discovery
 
-`MAX_MODELS` was a hand-curated config list that drifted every time Anthropic shipped a new Opus. Each OAuth account now has its `/v1/models` list discovered lazily on attach and re-checked on the periodic refresh task (with a 6h TTL so it doesn't hammer upstream). `get_account_for_oauth(model=...)` prefers accounts whose discovered list confirms support; the static `MAX_MODELS` heuristic stays as a fallback for accounts where discovery hasn't completed yet. New models route automatically as soon as Anthropic grants access — no config change required.
+`MAX_MODELS` was a hand-curated config list that drifted every time Anthropic shipped a new Opus — it's now gone entirely. Each OAuth account discovers its `/v1/models` list **synchronously when it gains an OAuth token** (add / cookie→OAuth upgrade / refresh) and re-checks it on the periodic refresh (6h TTL). Because discovery is also a proof the token works, a VALID OAuth account is normally already discovered. `get_account_for_oauth(model=...)` routes a model-gated request **only** to accounts whose discovered list confirms support; an account still awaiting (or failing) discovery isn't offered that traffic until its `/v1/models` succeeds, rather than being guessed at from a static list. New models route automatically as soon as Anthropic grants access — no list to maintain.
 
 **Where:** `app/core/account.py`, `app/services/account.py`, `app/services/oauth.py`
 

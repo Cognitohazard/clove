@@ -157,12 +157,14 @@ class AccountManager:
             f"oauth: {'Yes' if oauth_token else 'No'})"
         )
 
-        # 锁外: 启动后台 OAuth 认证任务
+        # 锁外: cookie_only 账户在后台升级 OAuth（受 semaphore 限流），
+        # 升级成功后在 _attempt_oauth_authentication 内同步发现模型。
         if auth_type == AuthType.COOKIE_ONLY:
             asyncio.create_task(self._attempt_oauth_authentication(account))
 
+        # 已带 token 的账户：同步发现模型，使其在 add 返回时即可被路由命中。
         if oauth_token:
-            asyncio.create_task(self._discover_account_models(account))
+            await self._discover_account_models(account)
 
         return account
 
@@ -178,11 +180,12 @@ class AccountManager:
         return age < self._MODEL_DISCOVERY_TTL
 
     async def _discover_account_models(self, account: Account) -> None:
-        """Best-effort background task to populate ``account.available_models``.
+        """Populate ``account.available_models`` from upstream ``/v1/models``.
 
-        Failures are silent — the static MAX_MODELS heuristic stays in place
-        until upstream is reachable. Eventually the periodic refresh task will
-        retry.
+        Run synchronously when an account gains an OAuth token so it becomes
+        routable as soon as it's validated. On failure ``available_models`` stays
+        ``None`` — the account isn't offered model-gated traffic and the periodic
+        refresh retries; there is no static model list to fall back on.
         """
         if self._models_discovery_is_fresh(account):
             return
@@ -350,41 +353,25 @@ class AccountManager:
     ) -> Account:
         """Get an available OAuth account, optionally filtered to one that serves ``model``.
 
-        Selection has two tiers when ``model`` is given:
-          * Confirmed pool — accounts whose upstream-discovered model list
-            contains ``model``.
-          * Unknown pool — accounts that haven't been discovered yet AND, for
-            models in ``settings.max_models``, are flagged as max-tier by their
-            cookie-side capabilities (the heuristic floor).
-
-        The unknown pool only kicks in when the confirmed pool is empty, so a
-        proxy where discovery has finished routes deterministically; one where
-        it hasn't keeps serving via the heuristic.
+        When ``model`` is given, only accounts whose upstream-discovered model
+        list confirms support are eligible. Discovery runs synchronously when an
+        account gains an OAuth token (add / cookie→OAuth upgrade / refresh), so a
+        VALID OAuth account is normally already discovered; one still awaiting or
+        failing discovery is simply not offered model-gated traffic until its
+        ``/v1/models`` succeeds — there is no static model list to guess from.
         """
-        confirmed: List[Account] = []
-        unknown: List[Account] = []
-        requires_max = bool(model) and model in settings.max_models
+        candidates: List[Account] = []
 
         for account in self._accounts.values():
             if account.status != AccountStatus.VALID:
                 continue
             if account.auth_type not in (AuthType.OAUTH_ONLY, AuthType.BOTH):
                 continue
-
-            if model is None:
-                confirmed.append(account)
+            if model is not None and account.can_serve_model(model) is not True:
                 continue
+            candidates.append(account)
 
-            serves = account.can_serve_model(model)
-            if serves is True:
-                confirmed.append(account)
-            elif serves is None and (not requires_max or account.is_max):
-                unknown.append(account)
-            # serves is False, or unknown account that can't satisfy max
-            # requirement: skip.
-
-        pool = confirmed or unknown
-        chosen = min(pool, key=lambda a: a.last_used, default=None)
+        chosen = min(candidates, key=lambda a: a.last_used, default=None)
         if chosen is None:
             raise NoAccountsAvailableError()
 
@@ -600,11 +587,14 @@ class AccountManager:
                 logger.warning(
                     f"OAuth authentication failed for account: {account.organization_uuid[:8]}..., keeping as CookieOnly"
                 )
-            else:
-                logger.info(
-                    f"OAuth authentication successful for account: {account.organization_uuid[:8]}..."
-                )
-            return success
+                return False
+
+            logger.info(
+                f"OAuth authentication successful for account: {account.organization_uuid[:8]}..."
+            )
+            # 升级成功即同步发现模型，使账户立即可被模型路由命中
+            await self._discover_account_models(account)
+            return True
 
     async def _upgrade_cookie_only_account(self, account: Account) -> None:
         """Background self-heal wrapper around the cookie → OAuth upgrade.

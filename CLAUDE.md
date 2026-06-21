@@ -227,7 +227,7 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 
 `cookie_only` 账户会自愈：`Account.needs_oauth_upgrade` 为真时，手动/批量刷新与周期循环都会重新尝试 cookie→OAuth 升级（不再只在 `add_account` 时跑一次），覆盖端点曾宕机或被降级的账户。所有触发点共用全局信号量 `MAX_CONCURRENT_OAUTH_UPGRADES=3` + 抖动冷却，避免对上游打风暴。
 
-`Account.available_models` 缓存上游 `/v1/models` 返回的模型列表。`add_account` 时后台 best-effort 拉取一次，之后 `refresh_account_status` 周期性更新；任何失败都保留现有缓存而非清零。`get_account_for_oauth(model=...)` 优先匹配 `can_serve_model(model) is True` 的账户，未发现的账户作为 fallback；`MAX_MODELS` 静态列表仍是 capabilities 不明时的兜底信号。
+`Account.available_models` 缓存上游 `/v1/models` 返回的模型列表，并随账户持久化。账户**获得 OAuth token 时（add / cookie→OAuth 自愈升级 / refresh）同步发现一次**，之后 `refresh_account_status` 周期性更新（6h TTL）；任何失败都保留现有缓存而非清零。`get_account_for_oauth(model=...)` 只在 `can_serve_model(model) is True` 的账户里选择——尚未发现（或发现失败）的账户**不承接带模型的请求**，直到其 `/v1/models` 成功为止；没有可选账户则抛 `NoAccountsAvailableError`。已无静态 `MAX_MODELS` 列表需要维护：发现即唯一真相来源。
 
 # API 路由
 
@@ -285,7 +285,6 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 - `INJECT_CLAUDE_CODE_SYSTEM_PROMPT`
 - `PROXY_URL` 旧固定代理配置，启动时会迁移到新 `proxy` 配置
 - `NO_FILESYSTEM_MODE` 会禁用文件读写，账户和配置只保存在内存中
-- `MAX_MODELS` 默认包含 `claude-opus-4-6`、`claude-opus-4-7` 与 `claude-opus-4-8`，用于选择 Max 账户
 - `ACCESS_LOG_ENABLED`（默认 `false`）开启结构化请求访问日志
 - `ACCESS_LOG_PATH`（默认 `logs/access.log`）访问日志路径
 - `ACCESS_LOG_ROTATION`（默认 `100 MB`）/ `ACCESS_LOG_RETENTION`（默认 `14 days`）轮转与保留
