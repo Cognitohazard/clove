@@ -225,6 +225,8 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 
 账户模型支持 `cookie_only`、`oauth_only`、`both` 三种认证类型。OAuth refresh 对临时失败有退避保护，达到最大重试次数后才会降级或标记账号失效。
 
+`cookie_only` 账户会自愈：`Account.needs_oauth_upgrade` 为真时，手动/批量刷新与周期循环都会重新尝试 cookie→OAuth 升级（不再只在 `add_account` 时跑一次），覆盖端点曾宕机或被降级的账户。所有触发点共用全局信号量 `MAX_CONCURRENT_OAUTH_UPGRADES=3` + 抖动冷却，避免对上游打风暴。
+
 `Account.available_models` 缓存上游 `/v1/models` 返回的模型列表。`add_account` 时后台 best-effort 拉取一次，之后 `refresh_account_status` 周期性更新；任何失败都保留现有缓存而非清零。`get_account_for_oauth(model=...)` 优先匹配 `can_serve_model(model) is True` 的账户，未发现的账户作为 fallback；`MAX_MODELS` 静态列表仍是 capabilities 不明时的兜底信号。
 
 # API 路由
@@ -277,6 +279,9 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 - `API_KEYS`, `ADMIN_API_KEYS`
 - `COOKIES`
 - `CLAUDE_AI_URL`, `CLAUDE_API_BASEURL`
+- `OAUTH_TOKEN_URL` token 端点，默认 `https://claude.ai/v1/oauth/token`（`console.anthropic.com/v1/oauth/token` 已被 Anthropic 下线返回 404，`api.anthropic.com/v1/oauth/token` 为已知可用 fallback）
+- `OAUTH_AUTHORIZE_URL` / `OAUTH_REDIRECT_URI` OAuth 授权与回调地址；URL 类设置有 `before` 校验器会剥离首尾多余引号/空白（规避 docker-compose `- OAUTH_TOKEN_URL="..."` 把引号当字面量的坑）
+- `MAX_CONCURRENT_OAUTH_UPGRADES` 默认 `3`，限制全局并发 cookie→OAuth 升级
 - `INJECT_CLAUDE_CODE_SYSTEM_PROMPT`
 - `PROXY_URL` 旧固定代理配置，启动时会迁移到新 `proxy` 配置
 - `NO_FILESYSTEM_MODE` 会禁用文件读写，账户和配置只保存在内存中
