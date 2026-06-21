@@ -149,11 +149,17 @@ class ToolChoice(BaseModel):
 
 
 # 工具定义（支持用户自定义工具和 Server Tool 如 web_search）
+class CustomToolSpec(BaseModel):
+    description: Optional[str] = None
+    input_schema: Optional[Any] = None
+
+
 class Tool(BaseModel):
-    name: str
     type: Optional[str] = None  # Server Tool（如 web_search）使用此字段
+    name: Optional[str] = None  # Server Tool 可能不带 name
     input_schema: Optional[Any] = None  # Server Tool 无此字段，改为可选
     description: Optional[str] = None
+    custom: Optional[CustomToolSpec] = None
 
 
 class OutputConfig(BaseModel):

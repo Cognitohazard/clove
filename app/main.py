@@ -33,7 +33,7 @@ def migrate_proxy_config():
     if not settings.proxy_url or settings.proxy is not None:
         return
 
-    logger.info(f"Migrating legacy proxy_url to new proxy format...")
+    logger.info("Migrating legacy proxy_url to new proxy format...")
 
     # 创建新的 proxy 配置
     new_proxy = ProxySettings(
