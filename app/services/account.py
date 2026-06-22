@@ -187,27 +187,30 @@ class AccountManager:
         ``None`` — the account isn't offered model-gated traffic and the periodic
         refresh retries; there is no static model list to fall back on.
         """
-        if self._models_discovery_is_fresh(account):
-            return
         try:
-            models = await oauth_authenticator.fetch_available_models(account)
-        except Exception as exc:
-            logger.debug(
-                f"Model discovery for {account.organization_uuid[:8]}... failed: {exc}"
-            )
-            return
-        if models is None:
-            return
+            if self._models_discovery_is_fresh(account):
+                return
+            try:
+                models = await oauth_authenticator.fetch_available_models(account)
+            except Exception as exc:
+                logger.debug(
+                    f"Model discovery for {account.organization_uuid[:8]}... failed: {exc}"
+                )
+                return
+            if models is None:
+                return
 
-        account.available_models_fetched_at = datetime.now(UTC)
-        if models == account.available_models:
-            return  # no change → no disk write
-        account.available_models = models
-        self.save_accounts()
-        logger.debug(
-            f"Discovered {len(models)} available models for "
-            f"{account.organization_uuid[:8]}..."
-        )
+            account.available_models_fetched_at = datetime.now(UTC)
+            if models == account.available_models:
+                return  # no change → no disk write
+            account.available_models = models
+            self.save_accounts()
+            logger.debug(
+                f"Discovered {len(models)} available models for "
+                f"{account.organization_uuid[:8]}..."
+            )
+        finally:
+            account.is_discovering = False
 
     # 仅从内存中移除账户，不持久化到磁盘
     def _remove_account_from_memory(self, organization_uuid: str) -> None:
@@ -502,6 +505,23 @@ class AccountManager:
                     continue
                 account.is_refreshing = True
                 asyncio.create_task(self._upgrade_cookie_only_account(account))
+
+            # Discover models for VALID OAuth accounts whose list is missing or
+            # stale — accounts persisted before discovery existed, or whose
+            # add-time discovery failed, would otherwise never become routable
+            # (get_account_for_oauth requires a confirmed model list). The 6h TTL
+            # gate makes this a no-op once fresh; is_discovering stops a slow
+            # /v1/models from being re-scheduled every loop tick. Runs on the
+            # first loop iteration too, so it doubles as startup discovery.
+            if (
+                account.status == AccountStatus.VALID
+                and account.auth_type in (AuthType.OAUTH_ONLY, AuthType.BOTH)
+                and account.oauth_token
+                and not account.is_discovering
+                and not self._models_discovery_is_fresh(account)
+            ):
+                account.is_discovering = True
+                asyncio.create_task(self._discover_account_models(account))
 
     # Max transient refresh failures before treating as permanent
     MAX_REFRESH_RETRIES = 3

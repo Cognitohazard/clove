@@ -79,6 +79,9 @@ class Account:
         self.refresh_fail_count: int = 0
         self.refresh_retry_after: Optional[datetime] = None
         self.is_refreshing: bool = False
+        # Guards against re-scheduling background model discovery while one is
+        # already in flight (not persisted).
+        self.is_discovering: bool = False
 
     def can_serve_model(self, model: str) -> Optional[bool]:
         """Whether this account is known to be able to serve ``model``.

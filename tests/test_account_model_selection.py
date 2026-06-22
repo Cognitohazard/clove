@@ -11,6 +11,7 @@ import asyncio
 
 import pytest
 
+import app.services.account as account_service
 from app.core.account import Account, AuthType, AccountStatus, OAuthToken
 from app.core.exceptions import NoAccountsAvailableError
 from app.services.account import AccountManager
@@ -117,3 +118,33 @@ def test_unmodelled_request_serves_any_valid_account():
 
     chosen = asyncio.run(_manager(undiscovered).get_account_for_oauth())
     assert chosen.organization_uuid == "undisc"
+
+
+def test_periodic_loop_discovers_stale_persisted_account(monkeypatch):
+    """A pre-existing account loaded with available_models=None must recover via
+    the background loop alone — no manual refresh — or it stays unroutable."""
+    acct = _oauth_account("old", available_models=None)
+    acct.status = AccountStatus.VALID
+    acct.oauth_token = OAuthToken("a", "r", 9999999999.0)  # healthy, not near expiry
+    mgr = _manager(acct)
+    mgr.save_accounts = lambda: None
+
+    async def fake_fetch(account):
+        return ["claude-opus-4-8"]
+
+    monkeypatch.setattr(
+        account_service.oauth_authenticator, "fetch_available_models", fake_fetch
+    )
+
+    async def run():
+        # model-gated routing fails before discovery has run
+        with pytest.raises(NoAccountsAvailableError):
+            await mgr.get_account_for_oauth(model="claude-opus-4-8")
+        await mgr._check_and_refresh_accounts()
+        for _ in range(5):  # let the scheduled discovery task complete
+            await asyncio.sleep(0)
+        return await mgr.get_account_for_oauth(model="claude-opus-4-8")
+
+    chosen = asyncio.run(run())
+    assert chosen.organization_uuid == "old"
+    assert acct.available_models == ["claude-opus-4-8"]
