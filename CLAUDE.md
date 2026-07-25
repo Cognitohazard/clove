@@ -227,6 +227,10 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 
 `cookie_only` 账户会自愈：`Account.needs_oauth_upgrade` 为真时，手动/批量刷新与周期循环都会重新尝试 cookie→OAuth 升级（不再只在 `add_account` 时跑一次），覆盖端点曾宕机或被降级的账户。所有触发点共用全局信号量 `MAX_CONCURRENT_OAUTH_UPGRADES=3` + 抖动冷却，避免对上游打风暴。
 
+自愈有一个**永久终止条件**：cookie→OAuth authorize 返回 403 且 `error.details.error_code == "session_stale_relogin"`（"Session is not fresh enough to grant elevated access"）时，说明该 cookie 背后的登录事件太旧，Anthropic 要求重新交互式登录才肯授予 OAuth。此时 `authenticate_account` 会写入 `Account.oauth_upgrade_blocked_reason`（随账户持久化），`needs_oauth_upgrade` 转为 False，自愈循环不再重试——否则会以固定节奏永远打一个必然失败的上游请求。**cookie 被替换时（`add_account` 更新已有账户 / `PUT /api/admin/accounts/{uuid}`）该标记自动清除**，因为新 cookie 可能来自一次新登录。注意 cookie 仍对 Web 链路有效：`/api/organizations` 照常 200，只有 authorize 这一步被拒。
+
+OAuth 排障请先跑 `uv run python scripts/probe_oauth.py`（`CLOVE_SK=<sessionKey>` 可选，用于跑完整 cookie 链路）。它用 app 自己的 HTTP 客户端逐步打印上游原始响应体，避免 TLS 指纹差异带来的假象。
+
 `Account.available_models` 缓存上游 `/v1/models` 返回的模型列表，并随账户持久化。账户**获得 OAuth token 时（add / cookie→OAuth 自愈升级 / refresh）同步发现一次**，之后 `refresh_account_status` 周期性更新（6h TTL）；任何失败都保留现有缓存而非清零。`get_account_for_oauth(model=...)` 只在 `can_serve_model(model) is True` 的账户里选择——尚未发现（或发现失败）的账户**不承接带模型的请求**，直到其 `/v1/models` 成功为止；没有可选账户则抛 `NoAccountsAvailableError`。已无静态 `MAX_MODELS` 列表需要维护：发现即唯一真相来源。
 
 # API 路由
@@ -279,7 +283,8 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 - `API_KEYS`, `ADMIN_API_KEYS`
 - `COOKIES`
 - `CLAUDE_AI_URL`, `CLAUDE_API_BASEURL`
-- `OAUTH_TOKEN_URL` token 端点，默认 `https://claude.ai/v1/oauth/token`（`console.anthropic.com/v1/oauth/token` 已被 Anthropic 下线返回 404，`api.anthropic.com/v1/oauth/token` 为已知可用 fallback）
+- `OAUTH_TOKEN_URL` token 端点，默认 `https://claude.ai/v1/oauth/token`（`console.anthropic.com/v1/oauth/token` 已被 Anthropic 下线返回 404；`api.anthropic.com/v1/oauth/token` 与 `platform.claude.com/v1/oauth/token` 均为已实测可用的 fallback，三者对同一 payload 行为一致）
+- token 端点的 `authorization_code` 授权**必须带 `state`**，否则返回不指名字段的 `invalid_request_error / "Invalid request format"`；`exchange_token` 依次从 `code` 的 `#state` 尾巴、调用方显式传入的 `state`、`verifier` 兜底取值。`refresh_token` 授权不受此限制，form 与 JSON 两种编码都接受
 - `OAUTH_AUTHORIZE_URL` / `OAUTH_REDIRECT_URI` OAuth 授权与回调地址；URL 类设置有 `before` 校验器会剥离首尾多余引号/空白（规避 docker-compose `- OAUTH_TOKEN_URL="..."` 把引号当字面量的坑）
 - `MAX_CONCURRENT_OAUTH_UPGRADES` 默认 `3`，限制全局并发 cookie→OAuth 升级
 - `INJECT_CLAUDE_CODE_SYSTEM_PROMPT`
