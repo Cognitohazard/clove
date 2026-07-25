@@ -39,6 +39,8 @@ class OAuthCodeExchange(BaseModel):
     organization_uuid: UUID
     code: str
     pkce_verifier: str
+    # Required by upstream on exchange; optional here only for pre-state clients.
+    state: Optional[str] = None
     capabilities: Optional[List[str]] = None
 
 
@@ -304,7 +306,7 @@ async def exchange_oauth_code(exchange_data: OAuthCodeExchange, _: AdminAuthDep)
     """Exchange OAuth authorization code for tokens and create account."""
     # Exchange code for tokens
     token_data = await oauth_authenticator.exchange_token(
-        exchange_data.code, exchange_data.pkce_verifier
+        exchange_data.code, exchange_data.pkce_verifier, exchange_data.state
     )
 
     if not token_data:

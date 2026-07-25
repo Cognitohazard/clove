@@ -34,6 +34,32 @@ class RefreshResult(Enum):
     PERMANENT_ERROR = "permanent_error"  # 401, 403, invalid token
 
 
+# Upstream error_code meaning "this cookie's login is too old to grant OAuth access".
+# Retrying is futile until the operator captures a cookie from a fresh sign-in.
+SESSION_STALE_ERROR_CODE = "session_stale_relogin"
+
+
+async def _upstream_detail(response: Response) -> str:
+    """Best-effort human-readable reason out of an upstream error body.
+
+    Covers both Anthropic's ``{"error": {"type", "message", "details"}}`` envelope
+    and the plain OAuth ``{"error", "error_description"}`` shape. Returns "" when
+    the body is missing or unparseable — callers supply their own fallback text.
+    """
+    try:
+        body = await response.json()
+    except Exception:
+        return ""
+
+    if not isinstance(body, dict):
+        return ""
+
+    error = body.get("error")
+    if isinstance(error, dict):
+        return error.get("message") or error.get("type") or ""
+    return " ".join(str(p) for p in (error, body.get("error_description")) if p)
+
+
 class OAuthAuthenticator:
     """OAuth authenticator for Claude accounts using cookies."""
 
@@ -116,18 +142,30 @@ class OAuthAuthenticator:
 
         if response.status_code == 403:
             # 先解析响应内容，区分代理问题和认证错误
+            upstream_error_code = None
             try:
                 error_data = await response.json()
                 error_body = error_data.get("error", {})
                 error_message = error_body.get("message", "Unknown error")
                 error_type = error_body.get("type", "unknown")
+                details = error_body.get("details") or {}
+                upstream_error_code = details.get("error_code")
             except Exception:
                 error_message = "HTTP 403 error with empty response"
                 error_type = "empty_response"
 
+            # Carried on the exception (and so into every log of it): a bare
+            # ClaudeAuthenticationError makes every 403 look alike.
+            auth_context = {
+                "upstream_url": url,
+                "upstream_type": error_type,
+                "upstream_message": error_message,
+                "upstream_error_code": upstream_error_code,
+            }
+
             # 真正的认证错误（有明确的错误消息）
             if error_message == "Invalid authorization":
-                raise ClaudeAuthenticationError()
+                raise ClaudeAuthenticationError(context=auth_context)
 
             # 403 + 空响应 + 有代理 = 代理 IP 被封
             if proxy_url and error_type == "empty_response":
@@ -144,7 +182,7 @@ class OAuthAuthenticator:
                 )
 
             # 其他 403 情况，抛出认证错误
-            raise ClaudeAuthenticationError()
+            raise ClaudeAuthenticationError(context=auth_context)
 
         if response.status_code == 429:
             raise ClaudeHttpError(
@@ -213,11 +251,18 @@ class OAuthAuthenticator:
             )
 
         if response.status_code >= 400:
+            # The body names the rejected field or grant; without it every token
+            # failure reads the same.
+            detail = await _upstream_detail(response)
+            logger.error(
+                f"OAuth token request to {url} failed: "
+                f"HTTP {response.status_code} {detail or '(no error body)'}"
+            )
             raise ClaudeHttpError(
                 url=url,
                 status_code=response.status_code,
                 error_type="token_error",
-                error_message="OAuth token request failed",
+                error_message=detail or "OAuth token request failed",
             )
 
         return response
@@ -337,11 +382,21 @@ class OAuthAuthenticator:
 
         return full_code, verifier
 
-    async def exchange_token(self, code: str, verifier: str) -> Dict:
-        """Exchange authorization code for access token."""
+    async def exchange_token(
+        self, code: str, verifier: str, state: Optional[str] = None
+    ) -> Dict:
+        """Exchange authorization code for access token.
+
+        ``state`` is mandatory upstream: omitting it is rejected with a generic
+        ``invalid_request_error / "Invalid request format"`` naming no field.
+        """
         parts = code.split("#")
         auth_code = parts[0]
-        state = parts[1] if len(parts) > 1 else None
+        tail = parts[1] if len(parts) > 1 else None
+        if not (tail or state):
+            # Legacy admin UI reused the verifier as state; remove once no client does.
+            logger.warning("Token exchange has no state; falling back to the verifier")
+        state = tail or state or verifier
 
         data = {
             "code": auth_code,
@@ -349,10 +404,8 @@ class OAuthAuthenticator:
             "client_id": settings.oauth_client_id,
             "redirect_uri": settings.oauth_redirect_uri,
             "code_verifier": verifier,
+            "state": state,
         }
-
-        if state:
-            data["state"] = state
 
         try:
             response = await self._token_request(settings.oauth_token_url, data=data)
@@ -431,7 +484,19 @@ class OAuthAuthenticator:
             return True
 
         except Exception as e:
-            logger.error(f"OAuth authentication failed: {e}")
+            context = getattr(e, "context", None) or {}
+            if context.get("upstream_error_code") == SESSION_STALE_ERROR_CODE:
+                # Permanent for this cookie, so stop retrying: the periodic loop
+                # would otherwise hammer upstream forever with a guaranteed failure.
+                account.oauth_upgrade_blocked_reason = SESSION_STALE_ERROR_CODE
+                account.save()
+                logger.error(
+                    f"OAuth upgrade permanently blocked for {account.organization_uuid[:8]}...: "
+                    "claude.ai requires a fresh sign-in to grant OAuth access. Sign out and "
+                    "back in, then replace this account's cookie with the new sessionKey."
+                )
+            else:
+                logger.error(f"OAuth authentication failed: {e}")
             return False
 
     async def refresh_account_token(self, account: Account) -> RefreshResult:

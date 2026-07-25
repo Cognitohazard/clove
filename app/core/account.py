@@ -64,7 +64,7 @@ class Account:
     ):
         self.organization_uuid = organization_uuid
         self.capabilities = capabilities
-        self.cookie_value = cookie_value
+        self._cookie_value = cookie_value
         self.status = AccountStatus.VALID
         self.auth_type = auth_type
         self.last_used = datetime.now()
@@ -74,6 +74,9 @@ class Account:
         self.available_models_fetched_at: Optional[datetime] = (
             available_models_fetched_at
         )
+        # Upstream's permanent refusal to upgrade *this cookie* (e.g.
+        # session_stale_relogin). Persisted, so a restart can't resume the retry storm.
+        self.oauth_upgrade_blocked_reason: Optional[str] = None
 
         # Transient runtime fields for OAuth refresh backoff (not persisted)
         self.refresh_fail_count: int = 0
@@ -82,6 +85,23 @@ class Account:
         # Guards against re-scheduling background model discovery while one is
         # already in flight (not persisted).
         self.is_discovering: bool = False
+
+    @property
+    def cookie_value(self) -> Optional[str]:
+        return self._cookie_value
+
+    @cookie_value.setter
+    def cookie_value(self, value: Optional[str]) -> None:
+        """Replacing the cookie clears any permanent OAuth-upgrade refusal.
+
+        The refusal is a verdict about one cookie's login age, so a new cookie
+        deserves a fresh attempt. Bound to the assignment rather than left to each
+        call site: a caller that forgot would leave the account permanently unable
+        to self-heal, and nothing would error.
+        """
+        if value != self._cookie_value:
+            self.oauth_upgrade_blocked_reason = None
+        self._cookie_value = value
 
     def can_serve_model(self, model: str) -> Optional[bool]:
         """Whether this account is known to be able to serve ``model``.
@@ -154,6 +174,7 @@ class Account:
                 if self.available_models_fetched_at
                 else None
             ),
+            "oauth_upgrade_blocked_reason": self.oauth_upgrade_blocked_reason,
         }
 
     @classmethod
@@ -178,6 +199,8 @@ class Account:
 
         if "oauth_token" in data and data["oauth_token"]:
             account.oauth_token = OAuthToken.from_dict(data["oauth_token"])
+
+        account.oauth_upgrade_blocked_reason = data.get("oauth_upgrade_blocked_reason")
 
         return account
 
@@ -207,12 +230,14 @@ class Account:
         """Cookie-only account eligible for a cookie → OAuth token upgrade.
 
         True when it has a usable cookie but no OAuth token yet (i.e. not
-        already OAuth-capable).
+        already OAuth-capable), and upstream hasn't permanently refused the
+        upgrade for this cookie.
         """
         return (
             self.auth_type == AuthType.COOKIE_ONLY
             and bool(self.cookie_value)
             and self.oauth_token is None
+            and self.oauth_upgrade_blocked_reason is None
         )
 
     def __repr__(self) -> str:

@@ -123,6 +123,7 @@ class AccountManager:
                         del self._cookie_to_uuid[existing_account.cookie_value]
                     existing_account.cookie_value = cookie_value
                     self._cookie_to_uuid[cookie_value] = organization_uuid
+                    self.save_accounts()
                 return existing_account
 
             if not organization_uuid:
