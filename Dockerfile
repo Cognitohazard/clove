@@ -3,7 +3,7 @@
 # =============================================================================
 # Stage 1: Build frontend
 # =============================================================================
-FROM node:20-alpine AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
 
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate

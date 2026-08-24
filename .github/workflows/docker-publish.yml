@@ -21,6 +21,9 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # Fail loudly instead of drifting into the 6h job ceiling: a healthy
+    # build is minutes, so anything past this is a regression to look at.
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
