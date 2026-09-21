@@ -63,19 +63,24 @@ async def _upstream_detail(response: Response) -> str:
 class OAuthAuthenticator:
     """OAuth authenticator for Claude accounts using cookies."""
 
-    def _generate_pkce(self) -> Tuple[str, str]:
-        """Generate PKCE verifier and challenge."""
-        verifier = (
-            base64.urlsafe_b64encode(secrets.token_bytes(32))
-            .decode("utf-8")
-            .rstrip("=")
-        )
+    @staticmethod
+    def _random_token() -> str:
+        return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
+
+    def generate_pkce(self) -> Tuple[str, str, str]:
+        """Fresh (verifier, challenge, state) for one authorization request.
+
+        state is generated separately from the verifier: it is echoed through
+        the redirect and shown on the callback page, so reusing the verifier as
+        state would publish it and defeat PKCE.
+        """
+        verifier = self._random_token()
         challenge = (
-            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("utf-8")).digest())
-            .decode("utf-8")
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+            .decode()
             .rstrip("=")
         )
-        return verifier, challenge
+        return verifier, challenge, self._random_token()
 
     def _build_headers(self, cookie: str) -> Dict[str, str]:
         """Build request headers for browser-impersonating claude.ai calls.
@@ -320,12 +325,7 @@ class OAuthAuthenticator:
         Use Cookie to automatically get authorization code.
         Returns: (authorization code, verifier)
         """
-        verifier, challenge = self._generate_pkce()
-        state = (
-            base64.urlsafe_b64encode(secrets.token_bytes(32))
-            .decode("utf-8")
-            .rstrip("=")
-        )
+        verifier, challenge, state = self.generate_pkce()
 
         authorize_url = settings.oauth_authorize_url.format(
             organization_uuid=organization_uuid

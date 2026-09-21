@@ -35,6 +35,12 @@ class AccountUpdate(BaseModel):
     status: Optional[AccountStatus] = None
 
 
+class OAuthPkce(BaseModel):
+    verifier: str
+    challenge: str
+    state: str
+
+
 class OAuthCodeExchange(BaseModel):
     organization_uuid: UUID
     code: str
@@ -299,6 +305,19 @@ async def delete_account(organization_uuid: str, _: AdminAuthDep):
     await account_manager.remove_account(organization_uuid)
 
     return {"message": "Account deleted successfully"}
+
+
+@router.post("/oauth/pkce", response_model=OAuthPkce)
+async def create_oauth_pkce(_: AdminAuthDep):
+    """PKCE pair and state for the admin UI's manual OAuth flow.
+
+    Generated here rather than in the browser: ``crypto.subtle`` (the only
+    SHA-256 the browser offers) exists solely in a secure context — https or
+    localhost — so an admin UI served over plain http on a server has no way
+    to build the code_challenge itself.
+    """
+    verifier, challenge, state = oauth_authenticator.generate_pkce()
+    return OAuthPkce(verifier=verifier, challenge=challenge, state=state)
 
 
 @router.post("/oauth/exchange", response_model=AccountResponse)

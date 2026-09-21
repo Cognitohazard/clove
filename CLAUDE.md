@@ -285,6 +285,7 @@ OAuth 排障请先跑 `uv run python scripts/probe_oauth.py`（`CLOVE_SK=<sessio
 - `CLAUDE_AI_URL`, `CLAUDE_API_BASEURL`
 - `OAUTH_TOKEN_URL` token 端点，默认 `https://claude.ai/v1/oauth/token`（`console.anthropic.com/v1/oauth/token` 已被 Anthropic 下线返回 404；`api.anthropic.com/v1/oauth/token` 与 `platform.claude.com/v1/oauth/token` 均为已实测可用的 fallback，三者对同一 payload 行为一致）
 - token 端点的 `authorization_code` 授权**必须带 `state`**，否则返回不指名字段的 `invalid_request_error / "Invalid request format"`；`exchange_token` 依次从 `code` 的 `#state` 尾巴、调用方显式传入的 `state`、`verifier` 兜底取值。`refresh_token` 授权不受此限制，form 与 JSON 两种编码都接受
+- 管理端手动 OAuth 流程的 PKCE（verifier/challenge/state）由后端 `POST /api/admin/accounts/oauth/pkce` 生成（`oauth_authenticator.generate_pkce()`），**不在浏览器里算**：浏览器唯一的 SHA-256 是 `crypto.subtle`，它只存在于安全上下文（https 或 localhost），通过 `http://<服务器IP>` 打开管理端时为 `undefined`，会让「开始授权」直接报「生成授权 URL 失败」。`navigator.clipboard` 同属安全上下文限制（复制按钮在 http 下会静默失败，已 try/catch，仅降级）
 - `OAUTH_AUTHORIZE_URL` / `OAUTH_REDIRECT_URI` OAuth 授权与回调地址；URL 类设置有 `before` 校验器会剥离首尾多余引号/空白（规避 docker-compose `- OAUTH_TOKEN_URL="..."` 把引号当字面量的坑）
 - `MAX_CONCURRENT_OAUTH_UPGRADES` 默认 `3`，限制全局并发 cookie→OAuth 升级
 - `INJECT_CLAUDE_CODE_SYSTEM_PROMPT`

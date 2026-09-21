@@ -14,10 +14,8 @@ one 404s. That alone distinguishes "they moved the URL" from "our payload is wro
 """
 
 import asyncio
-import base64
 import json
 import os
-import secrets
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -34,10 +32,6 @@ TOKEN_URLS = [
     "https://platform.claude.com/v1/oauth/token",
     "https://console.anthropic.com/v1/oauth/token",
 ]
-
-
-def _rand() -> str:
-    return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
 
 
 async def _body(response) -> str:
@@ -104,8 +98,7 @@ async def probe_cookie_chain(session_key: str) -> None:
         print(f"  org={org_uuid} capabilities={org.get('capabilities')}\n")
 
         print("=== POST authorize (cookie -> code) ===")
-        verifier, challenge = oauth_authenticator._generate_pkce()
-        state = _rand()
+        verifier, challenge, state = oauth_authenticator.generate_pkce()
         response = await session.request(
             method="POST",
             url=settings.oauth_authorize_url.format(organization_uuid=org_uuid),
