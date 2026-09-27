@@ -166,6 +166,56 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 - `invalid_request_error` 被视为不可重试错误
 - 403 空响应会把当前代理标记为 unhealthy
 
+## Claude Code 身份伪装 (identity layer)
+
+为了让 Clove 发往 `CLAUDE_API_BASEURL` 的每一次 OAuth 请求在传输层、Header 层和计费层都与真实
+Claude Code CLI 一致（而不只是加一条 system prompt），`app/utils/claude_code_identity.py` 提供一
+组纯函数：`serialize` / `compute_cch` / `version_suffix` / `derive_session_id` /
+`derive_prompt_id` / `finalize_messages_body` / `build_messages_headers` / `build_api_headers`，
+以及供漂移检测复用的 `verify_billing`。
+
+- 所有 OAuth 客户端走同一条路径，不保留"原生 Claude Code 直通"分支：无论上游是脚本、SDK 还是
+  真实 CC 客户端，都会被重写成同一份合成身份，避免旧客户端自带的 `cc_version` 触发 Anthropic
+  按版本的模型门禁（400 `... version Y or newer is required`）
+- `metadata.user_id` 是一个**JSON 字符串**（不是对象），键顺序固定为 `device_id` /
+  `account_uuid` / `session_id`；`device_id` 每账户随机生成一次并持久化，`account_uuid` 取自
+  OAuth token 响应（exchange / cookie 升级 / refresh 都会回填），取不到时为 `""`
+- `system` 数组固定为 `[billing_header, identity, ...client_system]`：billing header 携带
+  `cc_version` / `cc_entrypoint` / `cch` / `cc_prompt_id` / `cc_turn_origin`，identity 是
+  `You are Claude Code, Anthropic's official CLI for Claude.`，两者都不带 `cache_control`；
+  客户端自带的 system 文本去重后（丢弃已有的 billing header 块、去掉与 identity 重复的首行）
+  原样保留在后面
+- `INJECT_CLAUDE_CODE_SYSTEM_PROMPT=false` **新语义**：不再只是跳过 legacy system prompt 注入，
+  而是整个 body 按原始字节透传（不做 billing / identity / user_id 改写）；headers 和 TLS 仍然
+  维持 CLI 身份
+- `CLAUDE_CODE_VERSION` 固定使用的 CLI 版本号，跳过启动时/周期性向 npm registry
+  (`@anthropic-ai/claude-code`) 探测最新版本；不设置时每 24 小时刷新一次，失败保留旧值
+- OAuth 传输层（`app/core/http_client.py` 的对应工厂）用 rnet 关闭浏览器仿真，显式配置 TLS
+  （密码套件、扩展顺序、ALPN `http/1.1`）、HTTP/1.1、header 顺序/大小写，按代理 URL 缓存客户端
+  以复用连接和 TLS 会话
+
+### CLI 漂移检测
+
+Claude Code 每次发版都可能改变上述任一项（尤其是 Stainless SDK 版本号、beta 列表、TLS
+参数）。`scripts/capture_claude_code.py` 用本地 mitmproxy 中间人代理真实跑一次 Claude Code
+CLI（不会真正打到 Anthropic），提取结构性指纹并与 `tests/fixtures/claude_code_fingerprint.json`
+比对：
+
+```bash
+# 抓取一次并写入指纹（--version 默认 latest，从 npm registry 解析）
+uv run python scripts/capture_claude_code.py --write tests/fixtures/claude_code_fingerprint.json
+
+# 与已提交的 fixture 比对必需字段，非零退出码代表有 drift
+uv run python scripts/capture_claude_code.py --check
+
+# 走 Clove 自己的 OAuth 链路发一次请求，比对同一份 fixture
+uv run python scripts/capture_claude_code.py --clove
+```
+
+`.github/workflows/claude-code-drift.yml` 每天定时跑 `--check` + `--clove`，失败时在
+`claude-code-drift` 标签下开一个 issue（或评论到已存在的那个），不需要任何 secret。指纹文件只
+保留结构信息（TLS 参数、header 顺序、字段名/位置），不包含 prompt 内容、路径或 token。
+
 ## Claude.ai Web 链路要点
 
 核心文件：`app/processors/claude_ai/claude_web_processor.py`

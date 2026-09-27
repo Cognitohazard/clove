@@ -1,0 +1,73 @@
+name: Claude Code Drift
+
+on:
+  schedule:
+    - cron: "17 4 * * *" # Daily at 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Sync dependencies
+        run: uv sync --extra rnet --extra dev
+
+      - name: Work around the hatch force-include dev quirk
+        # See docs/hatch-build-issue.md -- app/static is build output, not
+        # tracked, and hatchling's editable-install check wants it to exist.
+        run: mkdir -p app/static app/locales
+
+      - name: Run the drift harness
+        id: drift
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo "## capture_claude_code.py --check"
+            uv run python scripts/capture_claude_code.py --check
+            echo
+            echo "## capture_claude_code.py --clove"
+            uv run python scripts/capture_claude_code.py --clove
+          } 2>&1 | tee drift-output.txt
+
+      - name: File or update the drift issue
+        if: steps.drift.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh label create claude-code-drift \
+            --repo "$REPO" \
+            --color FBCA04 \
+            --description "Claude Code CLI fingerprint drift" \
+            2>/dev/null || true
+
+          issue_number=$(gh issue list --repo "$REPO" \
+            --label claude-code-drift --state open --json number \
+            --jq '.[0].number')
+
+          body="$(printf '## Drift detected at %s\n\n```\n%s\n```\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat drift-output.txt)")"
+
+          if [ -z "$issue_number" ]; then
+            gh issue create --repo "$REPO" \
+              --title "Claude Code CLI fingerprint drift" \
+              --label claude-code-drift \
+              --body "$body"
+          else
+            gh issue comment "$issue_number" --repo "$REPO" --body "$body"
+          fi
+
+      - name: Fail the job if drift was detected
+        if: steps.drift.outcome == 'failure'
+        run: exit 1
