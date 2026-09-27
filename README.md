@@ -34,9 +34,9 @@ docker compose up -d
 
 ### Claude Code Prompt Toggle
 
-Configurable `inject_claude_code_system_prompt` setting (default: `true`) to control whether the legacy "You are Claude Code" system prompt is injected into API requests. Allows disabling it for non-Claude-Code clients.
+Configurable `inject_claude_code_system_prompt` setting (default: `true`). It controls only the "You are Claude Code, Anthropic's official CLI for Claude." identity block that the OAuth path adds to `system`; `false` omits that block. The rest of the Claude Code identity layer (billing block, `metadata.user_id`, CLI headers and TLS fingerprint) always applies; see `docs/claude-code-wire-identity.md`.
 
-**Where:** `app/core/config.py`, `app/processors/claude_ai/claude_api_processor.py`
+**Where:** `app/core/config.py`, `app/utils/claude_code_identity.py`, `app/processors/claude_ai/claude_api_processor.py`
 
 ### Messages API Single-Attempt Proxying
 

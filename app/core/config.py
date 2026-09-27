@@ -166,7 +166,10 @@ class Settings(BaseSettings):
     inject_claude_code_system_prompt: bool = Field(
         default=True,
         env="INJECT_CLAUDE_CODE_SYSTEM_PROMPT",
-        description="Prepend the legacy Claude Code identity prompt on the OAuth/API path",
+        description=(
+            "Add the Claude Code identity system block on the OAuth path; false omits "
+            "only that block (billing block, metadata.user_id, headers and TLS always apply)"
+        ),
     )
     use_real_roles: bool = Field(default=True, env="USE_REAL_ROLES")
     human_name: str = Field(default="Human", env="CUSTOM_HUMAN_NAME")
