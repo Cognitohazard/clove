@@ -6,10 +6,12 @@ transport; the assertions are on what would go over the wire.
 
 import json
 import math
+from datetime import UTC, datetime
 
 import pytest
 from fastapi import Request
 from rnet.exceptions import ConnectionResetError as RnetConnectionResetError
+from rnet.exceptions import RequestError as RnetRequestError
 from rnet.exceptions import TimeoutError as RnetTimeoutError
 
 import app.processors.claude_ai.claude_api_processor as processor_module
@@ -17,7 +19,10 @@ import app.utils.claude_code_identity as identity
 from app.core.account import Account, AuthType, OAuthToken
 from app.core.exceptions import (
     ClaudeHttpError,
+    ClaudeRateLimitedError,
     MalformedRequestBodyError,
+    NoAccountsAvailableError,
+    OAuthAuthenticationNotAllowedError,
     ProxyConnectionError,
 )
 from app.core.http_client import OAuthSession
@@ -329,3 +334,130 @@ async def test_a_timeout_does_not_mark_the_proxy(wire, proxy, monkeypatch):
     with pytest.raises(RnetTimeoutError):
         await ClaudeAPIProcessor().process(_context())
     assert proxy == []
+
+
+# --------------------------------------------------------------------------
+# Error, fallback and success paths the identity layer must not change
+# --------------------------------------------------------------------------
+
+_RESET = 1790485200  # epoch seconds, as upstream sends the reset header
+
+
+def _error(status, error_type, message):
+    return _StubResponse(
+        status, {"type": "error", "error": {"type": error_type, "message": message}}
+    )
+
+
+@pytest.mark.parametrize(
+    "upstream, outcome, marked",
+    [
+        pytest.param(
+            _StubResponse(
+                429, None, headers={"anthropic-ratelimit-unified-reset": str(_RESET)}
+            ),
+            ClaudeRateLimitedError,
+            False,
+            id="429-reset",
+        ),
+        pytest.param(_StubResponse(403), ClaudeHttpError, True, id="403-empty"),
+        pytest.param(
+            _error(400, "invalid_request_error", "system: Invalid model name"),
+            None,
+            False,
+            id="invalid-model-falls-back",
+        ),
+        pytest.param(
+            _error(
+                401,
+                "authentication_error",
+                "OAuth authentication is currently not allowed for this organization.",
+            ),
+            OAuthAuthenticationNotAllowedError,
+            False,
+            id="oauth-not-allowed",
+        ),
+        pytest.param(
+            RnetRequestError("connection closed"),
+            ProxyConnectionError,
+            True,
+            id="transport-error",
+        ),
+        pytest.param(
+            NoAccountsAvailableError(), None, False, id="no-accounts-falls-back"
+        ),
+    ],
+)
+async def test_error_and_fallback_paths(
+    wire, proxy, monkeypatch, account, upstream, outcome, marked
+):
+    monkeypatch.setattr(processor_module.settings, "request_retry_interval", 0)
+    if isinstance(upstream, NoAccountsAvailableError):
+
+        async def no_account(**_kw):
+            raise upstream
+
+        monkeypatch.setattr(
+            processor_module.account_manager, "get_account_for_oauth", no_account
+        )
+    else:
+        wire(upstream)
+
+    if outcome is None:  # the Web fallback takes over
+        context = await ClaudeAPIProcessor().process(_context())
+        assert context.response is None
+    else:
+        with pytest.raises(outcome):
+            await ClaudeAPIProcessor().process(_context())
+    assert proxy == ([_PROXY] if marked else [])
+    if outcome is ClaudeRateLimitedError:
+        assert account.resets_at == datetime.fromtimestamp(_RESET, UTC)
+
+
+async def test_a_success_filters_headers_and_stores_checkpoints(wire, monkeypatch):
+    stored = []
+    cache = processor_module.cache_service
+    monkeypatch.setattr(cache, "process_messages", lambda *_a: (None, [("h", 1)]))
+    monkeypatch.setattr(
+        cache,
+        "add_checkpoints",
+        lambda checkpoints, org: stored.append((checkpoints, org)),
+    )
+    headers = {
+        "content-type": "application/json",
+        "Content-Encoding": "gzip",
+        "Content-Length": "40",
+        "request-id": "req_011CAbc",
+    }
+    wire(_StubResponse(200, {"type": "message"}, headers=headers))
+
+    context = await ClaudeAPIProcessor().process(_context())
+    sent = context.response.headers
+    assert "content-encoding" not in sent and "content-length" not in sent
+    assert sent["request-id"] == "req_011CAbc"
+    assert stored == [([("h", 1)], "org-uuid-0000")]
+
+
+async def test_a_body_over_1_mib_is_finalized_off_the_loop_to_the_same_bytes(
+    wire, monkeypatch
+):
+    real_to_thread = processor_module.asyncio.to_thread
+    offloaded = []
+
+    async def to_thread(func, *args):
+        offloaded.append(func)
+        return await real_to_thread(func, *args)
+
+    monkeypatch.setattr(processor_module.asyncio, "to_thread", to_thread)
+    big = {**_BODY, "messages": [{"role": "user", "content": "x" * (1 << 20)}]}
+    session = wire(_ok())
+    await ClaudeAPIProcessor().process(_context(big))
+    assert len(offloaded) == 1
+
+    monkeypatch.setattr(processor_module, "_FINALIZE_OFFLOAD_BYTES", 1 << 30)
+    await ClaudeAPIProcessor().process(_context(big))
+    assert len(offloaded) == 1  # inline this time
+
+    off_loop, inline = session.calls
+    assert off_loop.data == inline.data
+    assert verify_billing(off_loop.data) == (True, True)

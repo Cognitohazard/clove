@@ -184,7 +184,8 @@ class _StubResponse:
 
 
 class _StubSession(AsyncSession):
-    """Records each request and answers with ``responses`` in turn (the last repeats)."""
+    """Records each request and answers with ``responses`` in turn (the last
+    repeats); an exception in ``responses`` is raised instead."""
 
     def __init__(self, *responses):
         self.calls = []
@@ -195,9 +196,12 @@ class _StubSession(AsyncSession):
         self.calls.append(
             SimpleNamespace(method=method, url=url, headers=pairs, data=data, **kwargs)
         )
-        return (
+        answer = (
             self._responses.pop(0) if len(self._responses) > 1 else self._responses[0]
         )
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
 
     async def close(self):
         pass
