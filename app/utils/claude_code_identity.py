@@ -124,6 +124,10 @@ TLS_PROFILE = {
     "key_share_groups": ["0x11ec", "0x001d"],
 }
 
+# The CLI's leading body keys, in its order. Only the keys Clove inserts are
+# placed by it; keys the client sent keep the client's order.
+BODY_KEY_ORDER = ("model", "messages", "system", "tools", "metadata")
+
 BILLING_PREFIX = "x-anthropic-billing-header: "
 IDENTITY_TEXT = "You are Claude Code, Anthropic's official CLI for Claude."
 BASE_BETAS = ("claude-code-20250219", "oauth-2025-04-20")
@@ -719,22 +723,17 @@ def _system_blocks(
 
 
 def _with_cli_key_order(body: dict, system: list, metadata: dict) -> dict:
-    """Replace ``system``/``metadata`` in place; insert missing ones where the CLI puts them."""
-    items = []
-    for key, value in body.items():
-        if key == "system":
-            value = system
-        elif key == "metadata":
-            value = metadata
-        items.append((key, value))
-        if key == "messages" and "system" not in body:
-            items.append(("system", system))
-    if "system" not in body and "messages" not in body:
-        items.append(("system", system))
-    if "metadata" not in body:
-        anchor = "tools" if "tools" in body else "system"
-        index = next(i for i, (key, _) in enumerate(items) if key == anchor)
-        items.insert(index + 1, ("metadata", metadata))
+    """``body`` with ``system`` and ``metadata`` replaced in place, or inserted
+    right after the nearest present key that precedes them in ``BODY_KEY_ORDER``
+    (at the end when none does)."""
+    ours = {"system": system, "metadata": metadata}
+    items = [(key, ours.get(key, value)) for key, value in body.items()]
+    for key, value in ours.items():  # in BODY_KEY_ORDER order
+        if key in body:
+            continue
+        keys = [k for k, _ in items]
+        before = [k for k in BODY_KEY_ORDER[: BODY_KEY_ORDER.index(key)] if k in keys]
+        items.insert(keys.index(before[-1]) + 1 if before else len(items), (key, value))
     return dict(items)
 
 
