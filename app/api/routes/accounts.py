@@ -2,7 +2,6 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from uuid import UUID
-import time
 
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_fixed
 
@@ -197,10 +196,8 @@ async def create_account(account_data: AccountCreate, _: AdminAuthDep):
     """Create a new account."""
     oauth_token = None
     if account_data.oauth_token:
-        oauth_token = OAuthToken(
-            access_token=account_data.oauth_token.access_token,
-            refresh_token=account_data.oauth_token.refresh_token,
-            expires_at=account_data.oauth_token.expires_at,
+        oauth_token = OAuthToken.from_token_response(
+            account_data.oauth_token.model_dump()
         )
 
     account = await account_manager.add_account(
@@ -256,10 +253,8 @@ async def update_account(
         account_manager._cookie_to_uuid[account_data.cookie_value] = organization_uuid
 
     if account_data.oauth_token is not None:
-        account.oauth_token = OAuthToken(
-            access_token=account_data.oauth_token.access_token,
-            refresh_token=account_data.oauth_token.refresh_token,
-            expires_at=account_data.oauth_token.expires_at,
+        account.oauth_token = OAuthToken.from_token_response(
+            account_data.oauth_token.model_dump()
         )
         # Update auth type based on what's available
         if account.cookie_value and account.oauth_token:
@@ -332,11 +327,7 @@ async def exchange_oauth_code(exchange_data: OAuthCodeExchange, _: AdminAuthDep)
         raise OAuthExchangeError(reason="Token exchange returned no data")
 
     # Create OAuth token object
-    oauth_token = OAuthToken(
-        access_token=token_data["access_token"],
-        refresh_token=token_data["refresh_token"],
-        expires_at=time.time() + token_data["expires_in"],
-    )
+    oauth_token = OAuthToken.from_token_response(token_data)
 
     # Create account with OAuth token
     account = await account_manager.add_account(

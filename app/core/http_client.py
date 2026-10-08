@@ -1,7 +1,8 @@
 """HTTP client abstraction layer that supports both curl_cffi and httpx."""
 
+import functools
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Optional, Dict, Any, Tuple, AsyncIterator
 from tenacity import (
     AsyncRetrying,
@@ -52,7 +53,7 @@ if not RNET_AVAILABLE and not CURL_CFFI_AVAILABLE and not HTTPX_AVAILABLE:
 
 async def _run_with_retries(
     operation: Callable[[], Awaitable[Any]],
-    retry_exception: type[BaseException],
+    retry_exception: type[BaseException] | tuple[type[BaseException], ...],
     attempts: int,
 ) -> Any:
     if attempts <= 1:
@@ -663,17 +664,184 @@ if RNET_AVAILABLE:
         TimeoutError as RnetTimeoutError,
         TlsError as RnetTlsError,
     )
+
     # 精确分类：只包含代理相关的网络异常
     # 排除：DNSResolverError（本地DNS）、RedirectError（目标服务器）、
     #      DecodingError/BodyError/BuilderError/URLParseError（代码/数据问题）
     ProxyNetworkException = (
-        RnetConnectionError,       # 代理连接失败
+        RnetConnectionError,  # 代理连接失败
         RnetConnectionResetError,  # 连接被重置
-        RnetTimeoutError,          # 连接超时
-        RnetTlsError,              # TLS 握手失败
-        RnetRequestError,          # 通用请求错误
+        RnetTimeoutError,  # 连接超时
+        RnetTlsError,  # TLS 握手失败
+        RnetRequestError,  # 通用请求错误
     )
 elif CURL_CFFI_AVAILABLE:
     ProxyNetworkException = (CurlRequestException,)
 else:
     ProxyNetworkException = (httpx.RequestError,)
+
+
+# --------------------------------------------------------------------------
+# OAuth transport: the Claude Code CLI's TLS and HTTP/1.1 request shape
+# --------------------------------------------------------------------------
+
+# BoringSSL names in the CLI's ClientHello order (``TLS_PROFILE`` in
+# app/utils/claude_code_identity.py): 3 TLS 1.3 suites, then 14 TLS 1.2 ones.
+_CLI_CIPHERS = ":".join(
+    [
+        "TLS_AES_128_GCM_SHA256",
+        "TLS_AES_256_GCM_SHA384",
+        "TLS_CHACHA20_POLY1305_SHA256",
+        "ECDHE-ECDSA-AES128-GCM-SHA256",
+        "ECDHE-RSA-AES128-GCM-SHA256",
+        "ECDHE-ECDSA-AES256-GCM-SHA384",
+        "ECDHE-RSA-AES256-GCM-SHA384",
+        "ECDHE-ECDSA-CHACHA20-POLY1305",
+        "ECDHE-RSA-CHACHA20-POLY1305",
+        "ECDHE-ECDSA-AES128-SHA",
+        "ECDHE-RSA-AES128-SHA",
+        "ECDHE-ECDSA-AES256-SHA",
+        "ECDHE-RSA-AES256-SHA",
+        "AES128-GCM-SHA256",
+        "AES256-GCM-SHA384",
+        "AES128-SHA",
+        "AES256-SHA",
+    ]
+)
+_CLI_CURVES = "X25519MLKEM768:X25519:P-256:P-384"
+_CLI_SIGALGS = ":".join(
+    [
+        "ecdsa_secp256r1_sha256",
+        "rsa_pss_rsae_sha256",
+        "rsa_pkcs1_sha256",
+        "ecdsa_secp384r1_sha384",
+        "rsa_pss_rsae_sha384",
+        "rsa_pkcs1_sha384",
+        "rsa_pss_rsae_sha512",
+        "rsa_pkcs1_sha512",
+        "rsa_pkcs1_sha1",
+    ]
+)
+# Below common server keep-alive timeouts (60 s and up), so a pooled connection
+# is rarely one the server has already closed.
+_OAUTH_POOL_IDLE_TIMEOUT = 30
+
+
+def _wire_header_order(names: Sequence[str], has_body: bool) -> list[str]:
+    """rnet ``orig_headers``: ``names`` in order plus the two headers rnet computes.
+
+    ``Host`` goes right after ``Connection`` (appended when there is none) and
+    ``Content-Length`` last when a body is sent, which is where the CLI puts them.
+    """
+    order = list(names)
+    lowered = [name.lower() for name in order]
+    host_at = lowered.index("connection") + 1 if "connection" in lowered else len(order)
+    order.insert(host_at, "Host")
+    if has_body:
+        order.append("Content-Length")
+    return order
+
+
+if RNET_AVAILABLE:
+
+    @functools.lru_cache(maxsize=64)
+    def _oauth_client(proxy: Optional[str]) -> "RnetClient":
+        """One client per proxy URL, so connections and TLS session tickets are
+        reused like the CLI's but never cross proxies."""
+        return RnetClient(
+            tls_options=rnet.TlsOptions(
+                cipher_list=_CLI_CIPHERS,
+                preserve_tls13_cipher_list=True,  # keep AES first on non-AES CPUs
+                curves_list=_CLI_CURVES,
+                sigalgs_list=_CLI_SIGALGS,
+                alpn_protocols=[rnet.AlpnProtocol.HTTP1],
+                grease_enabled=False,
+                permute_extensions=False,
+                enable_ech_grease=False,
+                session_ticket=True,
+                psk_dhe_ke=True,
+                pre_shared_key=False,
+                enable_ocsp_stapling=True,
+                enable_signed_cert_timestamps=True,
+                renegotiation=True,
+                min_tls_version=rnet.TlsVersion.TLS_1_2,
+                max_tls_version=rnet.TlsVersion.TLS_1_3,
+                key_shares_limit=2,
+            ),
+            http1_only=True,
+            proxies=[rnet.Proxy.all(proxy)] if proxy else None,
+            allow_redirects=False,
+            pool_idle_timeout=_OAUTH_POOL_IDLE_TIMEOUT,
+            gzip=True,
+            brotli=True,
+            deflate=True,
+            zstd=True,
+        )
+
+    class OAuthSession(AsyncSession):
+        """Sends requests with the Claude Code CLI's TLS, HTTP/1.1 and header shape.
+
+        Headers go out exactly as given, in order and casing; rnet adds none of
+        its own except ``Host`` and ``Content-Length`` (see ``_wire_header_order``).
+        Responses are decoded. The client is shared per proxy, so ``close()`` is a
+        no-op. A dead pooled connection surfaces as a ``RequestError``
+        (connection closed) or a ``ConnectionResetError``; both are retried once.
+        """
+
+        def __init__(self, client: "RnetClient", timeout: int):
+            self._client = client
+            self._timeout = timeout
+
+        async def request(
+            self,
+            method: str,
+            url: str,
+            headers: Mapping[str, str] | Sequence[tuple[str, str]],
+            data: Optional[bytes] = None,
+            stream: bool = False,  # rnet responses always stream
+            *,
+            params: Optional[Mapping[str, str]] = None,
+            timeout: Optional[int] = None,
+        ) -> Response:
+            pairs = list(headers.items() if isinstance(headers, Mapping) else headers)
+            header_map = rnet.HeaderMap()
+            for name, value in pairs:
+                header_map.insert(name, value)
+            kwargs: Dict[str, Any] = {
+                "headers": header_map,
+                "orig_headers": _wire_header_order(
+                    [name for name, _ in pairs], data is not None
+                ),
+                "default_headers": False,
+                "timeout": timeout if timeout is not None else self._timeout,
+            }
+            if data is not None:
+                kwargs["body"] = data
+            if params:
+                kwargs["query"] = dict(params)
+            rnet_method = getattr(RnetMethod, method.upper())
+
+            async def operation() -> Response:
+                return RnetResponse(
+                    await self._client.request(rnet_method, url, **kwargs)
+                )
+
+            return await _run_with_retries(
+                operation, (RnetRequestError, RnetConnectionResetError), 2
+            )
+
+        async def close(self):
+            pass
+
+
+def create_oauth_session(
+    proxy: Optional[str] = None, *, timeout: int = settings.request_timeout
+) -> AsyncSession:
+    """Session for every OAuth call to ``CLAUDE_API_BASEURL``.
+
+    Always rnet, the only client here that can reproduce the CLI's ClientHello.
+    ``timeout`` is the per-request default; ``request(timeout=...)`` overrides it.
+    """
+    if not RNET_AVAILABLE:
+        raise RuntimeError("The OAuth transport requires rnet (the 'rnet' extra)")
+    return OAuthSession(_oauth_client(proxy), timeout)
