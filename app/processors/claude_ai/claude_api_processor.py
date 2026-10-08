@@ -34,7 +34,7 @@ from app.utils.claude_code_identity import (
     build_messages_headers,
     bump_cli_version,
     cli_version,
-    derive_session_id,
+    effective_session_id,
     finalize_messages_body,
 )
 from app.views.messages_view import MessagesRequestView
@@ -81,8 +81,8 @@ class ClaudeAPIProcessor(BaseProcessor):
             settings.claude_api_baseurl.encoded_string().rstrip("/")
             + "/v1/messages?beta=true"
         )
-        # Conversation (derived session id) -> request-id of its last successful
-        # main response, which the CLI sends back as cc_prev_req.
+        # Session id sent on the wire -> request-id of its last successful main
+        # response, which the CLI sends back as cc_prev_req.
         self._prev_request_ids: dict[str, str] = {}
 
     async def process(self, context: ClaudeAIContext) -> ClaudeAIContext:
@@ -141,7 +141,7 @@ class ClaudeAPIProcessor(BaseProcessor):
                 try:
                     # A version-gate 400 bumps the CLI version and is retried once.
                     for attempt in (1, 2):
-                        conversation, finalized = await self._finalize(
+                        finalized = await self._finalize(
                             context.view,
                             account,
                             request_class=request_class,
@@ -260,7 +260,7 @@ class ClaudeAPIProcessor(BaseProcessor):
 
                 if request_class == "main":
                     self._remember_request_id(
-                        conversation, response.headers.get("request-id")
+                        finalized.session_id, response.headers.get("request-id")
                     )
 
                 tap = create_usage_tap(span, response.headers.get("content-type", ""))
@@ -312,26 +312,27 @@ class ClaudeAPIProcessor(BaseProcessor):
         *,
         request_class: str,
         client_prompt_id: Optional[str],
-    ) -> tuple[str, FinalizedBody]:
-        """(conversation key, the CLI-shaped body) for the client's raw JSON.
+    ) -> FinalizedBody:
+        """The CLI-shaped body for the client's raw JSON.
 
         ``INJECT_CLAUDE_CODE_SYSTEM_PROMPT=false`` omits only the identity block;
         billing and ``metadata.user_id`` always apply. Only main requests carry
-        ``cc_prev_req``, as with the CLI.
+        ``cc_prev_req``, looked up by the session id the body is sent with.
         """
 
-        def run() -> tuple[str, FinalizedBody]:
+        def run() -> FinalizedBody:
             body = view.raw_json
-            conversation = derive_session_id(account.device_id, body)
+            session_id = effective_session_id(account.device_id, body)
             prev_request_id = (
-                self._prev_request_ids.get(conversation)
+                self._prev_request_ids.get(session_id)
                 if request_class == "main"
                 else None
             )
-            return conversation, finalize_messages_body(
+            return finalize_messages_body(
                 body,
                 device_id=account.device_id,
                 account_uuid=account.oauth_token.account_uuid,
+                session_id=session_id,
                 client_prompt_id=client_prompt_id,
                 include_identity=settings.inject_claude_code_system_prompt,
                 prev_request_id=prev_request_id,
@@ -344,13 +345,11 @@ class ClaudeAPIProcessor(BaseProcessor):
         except ValueError as exc:  # NaN / Infinity, a system of the wrong type
             raise MalformedRequestBodyError(detail=str(exc)) from exc
 
-    def _remember_request_id(
-        self, conversation: str, request_id: Optional[str]
-    ) -> None:
+    def _remember_request_id(self, session_id: str, request_id: Optional[str]) -> None:
         if not request_id:
             return
         ids = self._prev_request_ids
-        ids.pop(conversation, None)
-        ids[conversation] = request_id
+        ids.pop(session_id, None)
+        ids[session_id] = request_id
         if len(ids) > _PREV_REQUEST_IDS_MAX:
             del ids[next(iter(ids))]

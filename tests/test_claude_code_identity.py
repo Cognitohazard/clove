@@ -643,6 +643,31 @@ def test_finalize_adopts_client_v4_session_and_prompt_ids():
     assert f"cc_prompt_id={CLIENT_V4.lower()};" in out["system"][0]["text"]
 
 
+def test_effective_session_id_is_the_adopted_id_else_the_derived_one():
+    plain = {"model": "m", "messages": [_user("hi")]}
+    adopted = {
+        **plain,
+        "metadata": {"user_id": json.dumps({"session_id": CLIENT_V4})},
+    }
+    assert cci.effective_session_id(DEVICE_ID, adopted) == CLIENT_V4.lower()
+    assert cci.effective_session_id(DEVICE_ID, plain) == cci.derive_session_id(
+        DEVICE_ID, plain
+    )
+    for body in (plain, adopted):
+        assert _finalize(body)[1].session_id == cci.effective_session_id(
+            DEVICE_ID, body
+        )
+
+
+def test_finalize_sends_a_given_session_id():
+    body = {"model": "m", "messages": [_user("hi")]}
+    session_id = CLIENT_V4.lower()
+    out, finalized = _finalize(body, session_id=session_id)
+    assert finalized.session_id == session_id
+    assert json.loads(out["metadata"]["user_id"])["session_id"] == session_id
+    assert finalized.prompt_id == cci.derive_prompt_id(session_id, body)
+
+
 @pytest.mark.parametrize("bad", [NOT_V4, "not-a-uuid", str(uuid.uuid1())])
 def test_finalize_ignores_non_v4_client_ids(bad):
     body = {

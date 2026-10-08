@@ -639,6 +639,22 @@ def _client_user_id(metadata: object) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _adopted_session_id(client_user_id: dict) -> str | None:
+    """The client's UUIDv4 ``session_id`` (lowercased), if it sent one."""
+    session_id = client_user_id.get("session_id")
+    return session_id.lower() if _is_uuid4(session_id) else None
+
+
+def effective_session_id(device_id: str, body: dict) -> str:
+    """The session id ``finalize_messages_body`` sends for ``body``.
+
+    The client's UUIDv4 ``session_id`` from a JSON ``metadata.user_id`` when it
+    has one, else ``derive_session_id``.
+    """
+    adopted = _adopted_session_id(_client_user_id(body.get("metadata")))
+    return adopted or derive_session_id(device_id, body)
+
+
 def _system_blocks(
     system: object, *, include_identity: bool, billing_text: str
 ) -> list:
@@ -698,6 +714,7 @@ def finalize_messages_body(
     *,
     device_id: str,
     account_uuid: str,
+    session_id: str | None = None,
     client_prompt_id: str | None = None,
     prev_request_id: str | None = None,
     include_identity: bool = True,
@@ -710,18 +727,18 @@ def finalize_messages_body(
     is kept with its client order; ``body`` itself is never mutated. A client's
     UUIDv4 ``session_id`` (in a JSON ``metadata.user_id``, whose extra keys are
     then kept after ours) and ``client_prompt_id`` are adopted, otherwise both
-    are derived. ``prev_request_id`` (the previous response's ``request-id``)
-    becomes ``cc_prev_req``. Raises ``ValueError`` for NaN or infinite numbers
-    and for a ``system`` that is neither a string nor a list.
+    are derived. ``session_id``, when given, is sent as is and must be
+    ``effective_session_id(device_id, body)``; a caller that needs the id before
+    finalizing passes it so it is not computed twice. ``prev_request_id`` (the
+    previous response's ``request-id``) becomes ``cc_prev_req``. Raises
+    ``ValueError`` for NaN or infinite numbers and for a ``system`` that is
+    neither a string nor a list.
     """
     client_metadata = body.get("metadata")
     client_user_id = _client_user_id(client_metadata)
-    client_session_id = client_user_id.get("session_id")
-    adopt_session = _is_uuid4(client_session_id)
-    if adopt_session:
-        session_id = client_session_id.lower()
-    else:
-        session_id = derive_session_id(device_id, body)
+    adopted_session_id = _adopted_session_id(client_user_id)
+    if session_id is None:
+        session_id = adopted_session_id or derive_session_id(device_id, body)
     if _is_uuid4(client_prompt_id):
         prompt_id = client_prompt_id.lower()
     else:
@@ -750,7 +767,7 @@ def finalize_messages_body(
         "account_uuid": account_uuid,
         "session_id": session_id,
     }
-    if adopt_session:
+    if adopted_session_id:
         for key, value in client_user_id.items():
             user_id.setdefault(key, value)
     metadata = dict(client_metadata) if isinstance(client_metadata, dict) else {}

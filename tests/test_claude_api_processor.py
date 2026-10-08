@@ -168,6 +168,34 @@ async def test_next_main_turn_carries_the_previous_request_id(wire):
     assert verify_billing(second.data) == (True, True)
 
 
+async def test_cc_prev_req_follows_the_adopted_client_session(wire):
+    """Two client sessions with the same first message keep separate chains, and a
+    session keeps its chain when its first message changes (compaction)."""
+
+    def turn(session_id, messages=_BODY["messages"]):
+        user_id = json.dumps({"session_id": session_id})
+        return {**_BODY, "messages": messages, "metadata": {"user_id": user_id}}
+
+    a = "11111111-1111-4111-8111-111111111111"
+    b = "22222222-2222-4222-8222-222222222222"
+    session = wire(*(_ok(f"req_011{n}") for n in ("A1", "B1", "A2", "A3")))
+    processor = ClaudeAPIProcessor()
+    later = _BODY["messages"] + [
+        {"role": "assistant", "content": "Hi."},
+        {"role": "user", "content": "Bye"},
+    ]
+    compacted = [{"role": "user", "content": "Summary of the chat so far"}]
+    for body in (turn(a), turn(b), turn(a, later), turn(a, compacted)):
+        await processor.process(_context(body))
+
+    a1, b1, a2, a3 = session.calls
+    assert dict(b1.headers)["X-Claude-Code-Session-Id"] == b
+    assert "cc_prev_req" not in _billing(b1.data)
+    assert " cc_prev_req=req_011A1;" in _billing(a2.data)
+    assert dict(a3.headers)["X-Claude-Code-Session-Id"] == a
+    assert " cc_prev_req=req_011A2;" in _billing(a3.data)
+
+
 async def test_auxiliary_requests_neither_send_nor_record_cc_prev_req(wire):
     session = wire(_ok("req_011First"), _ok("req_011Aux"), _ok("req_011Third"))
     processor = ClaudeAPIProcessor()
