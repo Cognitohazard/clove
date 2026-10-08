@@ -25,7 +25,7 @@ from app.utils.claude_code_identity import (
     serialize,
 )
 
-# The quota probe Claude Code 2.1.283 sends at startup: an auxiliary request with
+# The quota probe Claude Code 2.1.293 sends at startup: an auxiliary request with
 # no system prompt, no billing block and no prompt id, and its own beta list.
 _QUOTA_PROBE_MODEL = "claude-haiku-4-5-20251001"
 _QUOTA_PROBE_BETAS = (

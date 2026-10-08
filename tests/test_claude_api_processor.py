@@ -6,7 +6,6 @@ transport; the assertions are on what would go over the wire.
 
 import json
 import math
-import re
 from datetime import UTC, datetime
 
 import pytest
@@ -31,6 +30,7 @@ from app.processors.claude_ai import ClaudeAIContext
 from app.processors.claude_ai.claude_api_processor import ClaudeAPIProcessor
 from app.utils.claude_code_identity import HEADER_ORDER, IDENTITY_TEXT, verify_billing
 from app.views.messages_view import MessagesRequestView
+from tests.test_claude_code_identity import _billing_pattern
 from tests.test_oauth_transport import _FakeRnetClient, _StubResponse, _StubSession
 
 _BODY = {
@@ -54,7 +54,7 @@ def account():
 @pytest.fixture
 def wire(monkeypatch, account):
     """Route the processor to ``account`` and return a function installing a stub session."""
-    monkeypatch.setattr(identity, "_version", "2.1.283")
+    monkeypatch.setattr(identity, "_version", identity.FALLBACK_CLI_VERSION)
     monkeypatch.setattr(identity, "_pinned", False)
     monkeypatch.setattr(Account, "save", lambda self: None)  # never touch accounts.json
     monkeypatch.setattr(
@@ -147,7 +147,10 @@ async def test_request_goes_out_as_the_cli(wire):
     assert headers["X-Claude-Code-Session-Id"] == user_id["session_id"]
     assert user_id["account_uuid"] == "acc-uuid"
     assert headers["x-claude-code-request-class"] == "main"
-    assert headers["User-Agent"] == "claude-cli/2.1.283 (external, cli)"
+    assert (
+        headers["User-Agent"]
+        == f"claude-cli/{identity.FALLBACK_CLI_VERSION} (external, cli)"
+    )
     assert "cc_prev_req" not in _billing(call.data)
 
 
@@ -171,6 +174,8 @@ async def test_next_main_turn_carries_the_previous_request_id(wire):
         == (dict(second.headers)["X-Claude-Code-Session-Id"])
     )
     assert " cc_prev_req=req_011First;" in _billing(second.data)
+    assert _billing(first.data).endswith(" cc_prompt_index=1; cc_turn_index=1;")
+    assert _billing(second.data).endswith(" cc_prompt_index=2; cc_turn_index=2;")
     assert verify_billing(second.data) == (True, True)
 
 
@@ -215,14 +220,8 @@ async def test_a_clients_request_class_is_never_adopted(wire):
     _, aux_call, third = session.calls
     headers = dict(aux_call.headers)
     assert headers["x-claude-code-request-class"] == "main"
-    billing = re.fullmatch(
-        r"x-anthropic-billing-header: cc_version=2\.1\.283\.[0-9a-f]{3}; "
-        r"cc_entrypoint=cli; cch=[0-9a-f]{5}; cc_prev_req=req_011First; "
-        r"cc_prompt_id=([0-9a-f-]{36}); cc_turn_origin=human;",
-        _billing(aux_call.data),
-    )
-    assert billing is not None
-    assert headers["x-claude-code-prompt-id"] == billing.group(1)
+    pattern = _billing_pattern(headers["x-claude-code-prompt-id"], "req_011First")
+    assert pattern.fullmatch(_billing(aux_call.data))
     assert verify_billing(aux_call.data) == (True, True)
     assert " cc_prev_req=req_011Aux;" in _billing(third.data)
 

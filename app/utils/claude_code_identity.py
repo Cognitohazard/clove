@@ -2,7 +2,7 @@
 
 Pure functions plus the module-level CLI version: body finalization (billing
 block, identity block, ``metadata.user_id``, ``cch``) and the ordered header
-sets the genuine CLI sends. Ground truth is Claude Code 2.1.283, captured by
+sets the genuine CLI sends. Ground truth is Claude Code 2.1.293, captured by
 ``scripts/capture_claude_code.py``; the constants below are the runtime source
 of truth and a test pins them to ``tests/fixtures/claude_code_fingerprint.json``,
 which is never read at runtime.
@@ -34,10 +34,10 @@ import xxhash
 from loguru import logger
 
 # --------------------------------------------------------------------------
-# Captured constants (Claude Code 2.1.283)
+# Captured constants (Claude Code 2.1.293)
 # --------------------------------------------------------------------------
 
-FALLBACK_CLI_VERSION = "2.1.283"
+FALLBACK_CLI_VERSION = "2.1.293"
 
 HEADER_ORDER = [
     "Accept",
@@ -70,7 +70,7 @@ STATIC_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
     "X-Stainless-Lang": "js",
-    "X-Stainless-Package-Version": "0.112.1",
+    "X-Stainless-Package-Version": "0.128.0",
     "X-Stainless-Retry-Count": "0",
     "X-Stainless-Runtime": "node",
     "X-Stainless-Runtime-Version": "v26.3.0",
@@ -551,14 +551,15 @@ def _is_human_turn(message: object) -> bool:
     )
 
 
-def derive_prompt_id(session_id: str, body: dict) -> str:
-    """Prompt id that changes per human turn and holds across a tool loop.
-
-    A human turn is a user message without any ``tool_result`` block.
-    """
+def _human_turns(body: dict) -> int:
+    """The number of human turns: user messages without any ``tool_result`` block."""
     messages = body.get("messages")
-    turns = sum(map(_is_human_turn, messages)) if isinstance(messages, list) else 0
-    return _uuid4_from("clove:prompt", session_id, str(turns))
+    return sum(map(_is_human_turn, messages)) if isinstance(messages, list) else 0
+
+
+def derive_prompt_id(session_id: str, body: dict) -> str:
+    """Prompt id that changes per human turn and holds across a tool loop."""
+    return _uuid4_from("clove:prompt", session_id, str(_human_turns(body)))
 
 
 def _is_context_reminder(text: str) -> bool:
@@ -724,9 +725,10 @@ def finalize_messages_body(
     are derived. ``session_id``, when given, is sent as is and must be
     ``effective_session_id(device_id, body)``; a caller that needs the id before
     finalizing passes it so it is not computed twice. ``prev_request_id`` (the
-    previous response's ``request-id``) becomes ``cc_prev_req``. Raises
-    ``ValueError`` for NaN or infinite numbers and for a ``system`` that is
-    neither a string nor a list.
+    previous response's ``request-id``) becomes ``cc_prev_req``;
+    ``cc_prompt_index`` and ``cc_turn_index`` are both the number of human turns
+    (omitted when there is none). Raises ``ValueError`` for NaN or infinite
+    numbers and for a ``system`` that is neither a string nor a list.
     """
     client_metadata = body.get("metadata")
     client_user_id = _client_user_id(client_metadata)
@@ -748,9 +750,14 @@ def finalize_messages_body(
             logger.warning(
                 f"Dropping malformed previous request id {prev_request_id!r}"
             )
+    # cc_turn_index counts turns, cc_prompt_index the human-origin ones; every
+    # turn Clove sends is human-origin. The CLI drops both below turn 1.
+    turns = _human_turns(body)
+    turn_position = f" cc_prompt_index={turns}; cc_turn_index={turns};" if turns else ""
     billing_text = (
         f"{BILLING_PREFIX}cc_version={version}.{suffix}; cc_entrypoint=cli; "
-        f"cch={_CCH_PLACEHOLDER};{prev_req} cc_prompt_id={prompt_id}; cc_turn_origin=human;"
+        f"cch={_CCH_PLACEHOLDER};{prev_req} cc_prompt_id={prompt_id}; "
+        f"cc_turn_origin=human;{turn_position}"
     )
     system = _system_blocks(
         body.get("system"), include_identity=include_identity, billing_text=billing_text

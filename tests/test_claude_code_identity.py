@@ -234,8 +234,10 @@ def test_cch_rejects_malformed_json():
 # --------------------------------------------------------------------------
 
 
-def test_version_suffix_known_vector():
-    assert cci.version_suffix("Say hi", "2.1.283") == "a03"
+@pytest.mark.parametrize("version, want", [("2.1.283", "a03"), ("2.1.293", "2a8")])
+def test_version_suffix_known_vector(version, want):
+    # Both captured from the CLI's first "Say hi" turn.
+    assert cci.version_suffix("Say hi", version) == want
 
 
 def _expected_suffix(sampled: str, version: str) -> str:
@@ -356,12 +358,13 @@ def _user(text: str) -> dict:
     return {"role": "user", "content": [{"type": "text", "text": text}]}
 
 
-def _billing_pattern(prompt_id: str, prev_req: str = "") -> re.Pattern:
+def _billing_pattern(prompt_id: str, prev_req: str = "", turns: int = 1) -> re.Pattern:
     prev = f" cc_prev_req={re.escape(prev_req)};" if prev_req else ""
+    position = f" cc_prompt_index={turns}; cc_turn_index={turns};" if turns else ""
     return re.compile(
         rf"x-anthropic-billing-header: cc_version={re.escape(cci.cli_version())}\.[0-9a-f]{{3}}; "
         rf"cc_entrypoint=cli; cch=[0-9a-f]{{5}};{prev} cc_prompt_id={prompt_id}; "
-        r"cc_turn_origin=human;"
+        rf"cc_turn_origin=human;{position}"
     )
 
 
@@ -371,7 +374,6 @@ def test_finalize_writes_the_captured_billing_and_identity_layout():
     billing, identity = out["system"]
     assert billing == {"type": "text", "text": billing["text"]}  # no cache_control
     assert _billing_pattern(finalized.prompt_id).fullmatch(billing["text"])
-    assert f"cc_version={cci.cli_version()}.a03;" in billing["text"]
     fields = re.findall(r"(\w+)=", billing["text"].removeprefix(cci.BILLING_PREFIX))
     assert fields == FIXTURE["billing_block"]["fields"]
     assert identity == {"type": "text", "text": cci.IDENTITY_TEXT}
@@ -560,29 +562,94 @@ def test_finalize_rejects_nan():
         )
 
 
+# The 2.1.293 tool-loop capture, request by request (text trimmed): the CLI's
+# own mid-conversation ``system`` messages ride along, a Read tool loop stays in
+# turn 1, and the next typed message is turn 2.
+_CTX = {"role": "system", "content": "ctx"}
+_TURN_1 = [_user("Say hi"), _CTX]
+_TOOL_LOOP = [
+    {
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "toolu_01", "name": "Read", "input": {}}
+        ],
+    },
+    {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_01", "content": "x"},
+            {"type": "text", "text": "<system-reminder>x</system-reminder>"},
+        ],
+    },
+]
+_TOOL_FOLLOW_UP = _TURN_1 + _TOOL_LOOP + [_CTX]
+_TURN_2 = _TOOL_FOLLOW_UP + [
+    {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+    {"role": "user", "content": "Say hi again"},
+    _CTX,
+]
+
+
 def test_prompt_id_holds_across_a_tool_loop_and_changes_per_human_turn():
-    reminder = {"type": "text", "text": "<system-reminder>x</system-reminder>"}
-    turn_1 = [_user("list files")]
-    tool_loop = turn_1 + [
-        {
-            "role": "assistant",
-            "content": [{"type": "tool_use", "id": "t1", "name": "ls", "input": {}}],
-        },
-        {
-            "role": "user",
-            "content": [{"type": "tool_result", "tool_use_id": "t1"}, reminder],
-        },
-    ]
-    turn_2 = tool_loop + [
-        {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
-        _user("thanks"),
-    ]
     ids = [
-        _finalize({"model": "m", "messages": m})[1] for m in (turn_1, tool_loop, turn_2)
+        _finalize({"model": "m", "messages": m})[1]
+        for m in (_TURN_1, _TOOL_FOLLOW_UP, _TURN_2)
     ]
 
     assert ids[0].prompt_id == ids[1].prompt_id != ids[2].prompt_id
     assert ids[0].session_id == ids[1].session_id == ids[2].session_id
+
+
+@pytest.mark.parametrize(
+    "messages, turns",
+    [(_TURN_1, 1), (_TOOL_FOLLOW_UP, 1), (_TURN_2, 2), (_TOOL_LOOP, 0)],
+    ids=["human-turn", "tool-result-follow-up", "next-human-turn", "no-human-turn"],
+)
+def test_billing_turn_position_counts_human_turns(messages, turns):
+    # With no human turn the CLI cannot place the turn and drops both fields.
+    out, finalized = _finalize({"model": "m", "messages": messages})
+    billing = out["system"][0]["text"]
+    assert _billing_pattern(finalized.prompt_id, turns=turns).fullmatch(billing)
+    assert cci.verify_billing(finalized.body_bytes) == (True, True)
+
+
+# Run A's second main request from the 2.1.293 capture (three typed turns, no
+# tools): the CLI's billing text verbatim.
+_CAPTURED_TURN_2_BILLING = (
+    "x-anthropic-billing-header: cc_version=2.1.293.2a8; cc_entrypoint=cli; "
+    "cch=12682; cc_prev_req=req_0b800f8fa640d60a029ba151; "
+    "cc_prompt_id=941ecd9b-9f27-46ec-9f5f-5c8304c9f649; cc_turn_origin=human; "
+    "cc_prompt_index=2; cc_turn_index=2;"
+)
+
+
+def test_billing_text_matches_the_captured_2_1_293_turn_byte_for_byte(monkeypatch):
+    monkeypatch.setattr(cci, "_version", "2.1.293")
+    messages = [
+        _user("Say hi"),
+        {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        {"role": "user", "content": "Say hi again"},
+    ]
+    out, _ = _finalize(
+        {"model": "m", "messages": messages},
+        client_prompt_id="941ecd9b-9f27-46ec-9f5f-5c8304c9f649",
+        prev_request_id="req_0b800f8fa640d60a029ba151",
+    )
+    # cch signs the whole body, so only the CLI's own body reproduces its value.
+    ours = re.sub(r"cch=[0-9a-f]{5};", "cch=12682;", out["system"][0]["text"])
+    assert ours == _CAPTURED_TURN_2_BILLING
+
+
+def test_verify_billing_reads_a_captured_2_1_293_billing_block():
+    body = cci.serialize(
+        {
+            "model": "claude-sonnet-5-5",
+            "messages": [{"role": "user", "content": "Say hi"}],
+            "system": [{"type": "text", "text": _CAPTURED_TURN_2_BILLING}],
+        }
+    )
+    signed = body.replace(b"cch=12682;", f"cch={cci.compute_cch(body)};".encode())
+    assert cci.verify_billing(signed) == (True, True)
 
 
 def test_session_id_ignores_cache_control_moving_between_turns():
@@ -719,8 +786,9 @@ def test_verify_billing_flags_a_tampered_body():
     tampered = finalized.body_bytes.replace(b"Say hi", b"Say ho")
     assert cci.verify_billing(tampered) == (False, True)
     wrong_suffix = re.sub(
-        rb"cc_version=([0-9.]+)\.a03;", rb"cc_version=\1.fff;", finalized.body_bytes
+        rb"(cc_version=[0-9.]+\.)[0-9a-f]{3};", rb"\1fff;", finalized.body_bytes
     )
+    assert wrong_suffix != finalized.body_bytes
     assert cci.verify_billing(wrong_suffix)[1] is False
     assert cci.verify_billing(b'{"model":"m","messages":[]}') == (False, False)
 
