@@ -252,7 +252,7 @@ async def test_quota_probe_has_the_cli_probe_shape(monkeypatch):
 
 async def test_quota_probe_reads_the_429_reset(monkeypatch):
     _no_proxy(monkeypatch)
-    reset = {"anthropic-ratelimit-unified-reset": "2026-09-27T05:00:00Z"}
+    reset = {"anthropic-ratelimit-unified-reset": "1790485200"}  # epoch seconds
     session = _StubSession(_StubResponse(429, headers=reset))
     monkeypatch.setattr(http_client, "create_oauth_session", lambda **_kw: session)
 

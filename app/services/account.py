@@ -794,11 +794,12 @@ class AccountManager:
                     )
                     resets_at = None
                     if reset_header:
+                        # Epoch seconds, parsed as ClaudeAPIProcessor does
                         try:
-                            resets_at = datetime.fromisoformat(
-                                reset_header.replace("Z", "+00:00")
+                            resets_at = datetime.fromtimestamp(
+                                int(reset_header), tz=UTC
                             )
-                        except (ValueError, TypeError):
+                        except ValueError:
                             pass
                     return ("rate_limited", resets_at)
 
