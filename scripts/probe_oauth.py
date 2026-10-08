@@ -42,7 +42,6 @@ from app.core.http_client import (  # noqa: E402
     create_plain_session,
     create_session,
 )
-from app.processors.claude_ai.claude_api_processor import _VERSION_GATE  # noqa: E402
 from app.services.oauth import oauth_authenticator  # noqa: E402
 from app.services.proxy import proxy_service  # noqa: E402
 from app.utils.claude_code_identity import (  # noqa: E402
@@ -51,6 +50,7 @@ from app.utils.claude_code_identity import (  # noqa: E402
     bump_cli_version,
     cli_version,
     finalize_messages_body,
+    parse_version_gate,
     pin_cli_version,
     refresh_cli_version,
 )
@@ -219,14 +219,11 @@ class _MessagesProbe:
                 "POST", self.url, headers=headers, data=finalized.body_bytes
             )
             text = await _body(response)
-            gate = _VERSION_GATE.search(text) if response.status_code == 400 else None
+            gate = parse_version_gate(text) if response.status_code == 400 else None
             if (
                 attempt == 1
                 and gate
-                and (
-                    bump_cli_version(gate.group(1))
-                    or cli_version() != finalized.cli_version
-                )
+                and (bump_cli_version(gate) or cli_version() != finalized.cli_version)
             ):
                 print(f"  version gate: {text[:200]} -> retrying as {cli_version()}")
                 continue

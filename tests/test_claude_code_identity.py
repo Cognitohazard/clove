@@ -898,6 +898,15 @@ def test_pin_rejects_malformed_versions(monkeypatch):
     assert cci.cli_version() == cci.FALLBACK_CLI_VERSION
 
 
+def test_parse_version_gate_reads_the_demanded_version():
+    gate = (
+        "Claude Code 2.1.283 does not support this model; "
+        "version 2.1.300 or newer is required"
+    )
+    assert cci.parse_version_gate(gate) == "2.1.300"
+    assert cci.parse_version_gate("system: Invalid model name") is None
+
+
 def _connect_error(request):
     raise httpx.ConnectError("registry unreachable", request=request)
 

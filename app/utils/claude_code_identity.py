@@ -143,6 +143,9 @@ _REQUEST_ID = re.compile(r"req_[A-Za-z0-9_-]+")
 _SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 _BILLING_VERSION = re.compile(r"cc_version=([0-9]+\.[0-9]+\.[0-9]+)\.([0-9a-f]{3});")
+# Upstream's per-model CLI version gate: "Claude Code X does not support this
+# model; version Y or newer is required".
+_VERSION_GATE = re.compile(r"version (\d+\.\d+\.\d+) or newer is required")
 
 # --------------------------------------------------------------------------
 # CLI version state
@@ -207,6 +210,13 @@ def bump_cli_version(min_version: str) -> bool:
     logger.info(f"Claude Code version raised from {_version} to {min_version}")
     _version = min_version
     return True
+
+
+def parse_version_gate(message: str) -> str | None:
+    """The version an upstream version-gate error demands (``Y`` in
+    ``... version Y or newer is required``), else ``None``."""
+    match = _VERSION_GATE.search(message)
+    return match.group(1) if match else None
 
 
 async def refresh_cli_version() -> None:

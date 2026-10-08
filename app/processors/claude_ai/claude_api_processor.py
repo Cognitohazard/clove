@@ -36,12 +36,10 @@ from app.utils.claude_code_identity import (
     cli_version,
     effective_session_id,
     finalize_messages_body,
+    parse_version_gate,
 )
 from app.views.messages_view import MessagesRequestView
 
-# Upstream's per-model CLI version gate: "Claude Code X does not support this
-# model; version Y or newer is required".
-_VERSION_GATE = re.compile(r"version (\d+\.\d+\.\d+) or newer is required")
 # A Claude Code client's own request class ("main", "auxiliary", ...) is adopted
 # when it looks like one.
 _REQUEST_CLASS = re.compile(r"[a-z][a-z0-9_-]{0,31}")
@@ -165,18 +163,18 @@ class ClaudeAPIProcessor(BaseProcessor):
                         if response.status_code == 400:
                             error = await _read_error(response)
                         gate = (
-                            _VERSION_GATE.search(error[2])
+                            parse_version_gate(error[2])
                             if error and isinstance(error[2], str)
                             else None
                         )
                         if gate:
-                            bumped = bump_cli_version(gate.group(1))
+                            bumped = bump_cli_version(gate)
                             # A concurrent request may already have bumped it.
                             if attempt == 1 and (
                                 bumped or cli_version() != finalized.cli_version
                             ):
                                 logger.warning(
-                                    f"Upstream requires Claude Code {gate.group(1)} "
+                                    f"Upstream requires Claude Code {gate} "
                                     f"or newer; retrying as {cli_version()}"
                                 )
                                 continue
