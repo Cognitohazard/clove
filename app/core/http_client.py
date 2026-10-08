@@ -685,6 +685,19 @@ else:
 # OAuth transport: the Claude Code CLI's TLS and HTTP/1.1 request shape
 # --------------------------------------------------------------------------
 
+# OAuth transport failures that mean the proxy, or the path through it, is bad:
+# callers mark the proxy unhealthy. TimeoutError is left out on purpose: the
+# request timeout is a total one, so a slow generation would mark a healthy proxy.
+if RNET_AVAILABLE:
+    OAUTH_TRANSPORT_ERRORS: tuple[type[Exception], ...] = (
+        RnetRequestError,
+        RnetConnectionError,
+        RnetConnectionResetError,
+        RnetTlsError,
+    )
+else:
+    OAUTH_TRANSPORT_ERRORS = ()  # create_oauth_session raises without rnet
+
 # BoringSSL names in the CLI's ClientHello order (``TLS_PROFILE`` in
 # app/utils/claude_code_identity.py): 3 TLS 1.3 suites, then 14 TLS 1.2 ones.
 _CLI_CIPHERS = ":".join(
@@ -778,6 +791,15 @@ if RNET_AVAILABLE:
             zstd=True,
         )
 
+    def _header_map(pairs: Sequence[tuple[str, str]], retries: int) -> "rnet.HeaderMap":
+        """``pairs`` as given, except ``X-Stainless-Retry-Count`` on a retry."""
+        header_map = rnet.HeaderMap()
+        for name, value in pairs:
+            if retries and name.lower() == "x-stainless-retry-count":
+                value = str(retries)
+            header_map.insert(name, value)
+        return header_map
+
     class OAuthSession(AsyncSession):
         """Sends requests with the Claude Code CLI's TLS, HTTP/1.1 and header shape.
 
@@ -788,7 +810,7 @@ if RNET_AVAILABLE:
         (connection closed) or a ``ConnectionResetError``; both are retried once.
         """
 
-        def __init__(self, client: "RnetClient", timeout: int):
+        def __init__(self, client: "RnetClient", timeout: Optional[int] = None):
             self._client = client
             self._timeout = timeout
 
@@ -796,36 +818,44 @@ if RNET_AVAILABLE:
             self,
             method: str,
             url: str,
+            *,
             headers: Mapping[str, str] | Sequence[tuple[str, str]],
             data: Optional[bytes] = None,
             stream: bool = False,  # rnet responses always stream
-            *,
             params: Optional[Mapping[str, str]] = None,
             timeout: Optional[int] = None,
         ) -> Response:
+            """``timeout``: this call's, else the session's, else ``REQUEST_TIMEOUT`` now."""
             pairs = list(headers.items() if isinstance(headers, Mapping) else headers)
-            header_map = rnet.HeaderMap()
-            for name, value in pairs:
-                header_map.insert(name, value)
             kwargs: Dict[str, Any] = {
-                "headers": header_map,
                 "orig_headers": _wire_header_order(
                     [name for name, _ in pairs], data is not None
                 ),
                 "default_headers": False,
-                "timeout": timeout if timeout is not None else self._timeout,
+                "timeout": timeout or self._timeout or settings.request_timeout,
             }
             if data is not None:
                 kwargs["body"] = data
             if params:
                 kwargs["query"] = dict(params)
             rnet_method = getattr(RnetMethod, method.upper())
+            attempts = 0
 
             async def operation() -> Response:
+                nonlocal attempts
+                header_map = _header_map(pairs, retries=attempts)
+                attempts += 1
                 return RnetResponse(
-                    await self._client.request(rnet_method, url, **kwargs)
+                    await self._client.request(
+                        rnet_method, url, headers=header_map, **kwargs
+                    )
                 )
 
+            # ponytail: one retry. rnet cannot tell a stale pooled connection from
+            # a fresh one that dropped after the request went out, so a
+            # non-idempotent POST may reach upstream twice. The Stainless SDK the
+            # CLI is built on retries the same way and counts it in
+            # X-Stainless-Retry-Count, which the retried attempt sends as 1.
             return await _run_with_retries(
                 operation, (RnetRequestError, RnetConnectionResetError), 2
             )
@@ -835,12 +865,13 @@ if RNET_AVAILABLE:
 
 
 def create_oauth_session(
-    proxy: Optional[str] = None, *, timeout: int = settings.request_timeout
+    proxy: Optional[str] = None, *, timeout: Optional[int] = None
 ) -> AsyncSession:
     """Session for every OAuth call to ``CLAUDE_API_BASEURL``.
 
     Always rnet, the only client here that can reproduce the CLI's ClientHello.
-    ``timeout`` is the per-request default; ``request(timeout=...)`` overrides it.
+    ``timeout`` is the per-request default (``None``: ``REQUEST_TIMEOUT`` at call
+    time); ``request(timeout=...)`` overrides it.
     """
     if not RNET_AVAILABLE:
         raise RuntimeError("The OAuth transport requires rnet (the 'rnet' extra)")

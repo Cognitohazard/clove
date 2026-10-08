@@ -2,9 +2,9 @@ import asyncio
 import re
 
 from app.core.http_client import (
+    OAUTH_TRANSPORT_ERRORS,
     Response,
     create_oauth_session,
-    RequestException,
 )
 from datetime import datetime, timedelta, UTC
 from typing import Optional
@@ -181,7 +181,7 @@ class ClaudeAPIProcessor(BaseProcessor):
                                 )
                                 continue
                         break
-                except RequestException as e:
+                except OAUTH_TRANSPORT_ERRORS as e:
                     # Mark proxy transport failures as retryable for non-transparent callers.
                     await session.close()
                     if proxy_url:

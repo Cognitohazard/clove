@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from app.core.config import settings
-from app.core.http_client import RequestException, create_oauth_session
+from app.core.http_client import OAUTH_TRANSPORT_ERRORS, create_oauth_session
 from app.dependencies.auth import AuthDep
 from app.core.exceptions import NoAccountsAvailableError, ProxyConnectionError
 from app.services.account import account_manager
@@ -42,7 +42,7 @@ async def _proxy_models_request(
             ),
             params=query_params,
         )
-    except RequestException as exc:
+    except OAUTH_TRANSPORT_ERRORS as exc:
         if proxy_url:
             await proxy_service.mark_unhealthy(
                 proxy_url, reason=f"connection error: {type(exc).__name__}"

@@ -13,6 +13,7 @@ import pytest
 from fastapi import Request
 from rnet.exceptions import ConnectionError as RnetConnectionError
 from rnet.exceptions import ConnectionResetError as RnetConnectionResetError
+from rnet.exceptions import RequestError as RnetRequestError
 
 import app.api.routes.models as models_route
 import app.core.http_client as http_client
@@ -117,6 +118,21 @@ async def test_a_dead_pooled_connection_is_retried_once(monkeypatch):
     assert len(twice.calls) == 2
 
 
+async def test_the_retried_attempt_counts_itself_like_the_stainless_sdk(monkeypatch):
+    monkeypatch.setattr(http_client.settings, "request_retry_interval", 0)
+    client = _FakeRnetClient(RnetRequestError("connection closed"))
+    headers = [("Accept", "application/json"), ("X-Stainless-Retry-Count", "0")]
+    await OAuthSession(client, timeout=7).request(
+        "POST", "https://api.example/", headers=headers, data=b"x"
+    )
+
+    first, retry = client.calls
+    assert first.headers["X-Stainless-Retry-Count"] == b"0"
+    assert retry.headers["X-Stainless-Retry-Count"] == b"1"
+    assert retry.headers["Accept"] == b"application/json"
+    assert retry.orig_headers == first.orig_headers
+
+
 async def test_a_failed_connect_is_not_retried():
     client = _FakeRnetClient(RnetConnectionError("refused"))
     with pytest.raises(RnetConnectionError):
@@ -124,6 +140,21 @@ async def test_a_failed_connect_is_not_retried():
             "POST", "https://api.example/", headers={}, data=b"x"
         )
     assert len(client.calls) == 1
+
+
+async def test_request_takes_headers_and_body_by_keyword_only():
+    with pytest.raises(TypeError):
+        await OAuthSession(_FakeRnetClient()).request(
+            "POST", "https://api.example/", [("Accept", "a")], b"x"
+        )
+
+
+async def test_the_default_timeout_is_read_at_call_time(monkeypatch):
+    client = _FakeRnetClient()
+    session = OAuthSession(client)
+    monkeypatch.setattr(http_client.settings, "request_timeout", 11)
+    await session.request("GET", "https://api.example/", headers={})
+    assert client.calls[0].timeout == 11
 
 
 def test_one_client_per_proxy():

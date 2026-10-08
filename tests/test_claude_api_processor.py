@@ -9,16 +9,23 @@ import math
 
 import pytest
 from fastapi import Request
+from rnet.exceptions import ConnectionResetError as RnetConnectionResetError
+from rnet.exceptions import TimeoutError as RnetTimeoutError
 
 import app.processors.claude_ai.claude_api_processor as processor_module
 import app.utils.claude_code_identity as identity
 from app.core.account import Account, AuthType, OAuthToken
-from app.core.exceptions import ClaudeHttpError, MalformedRequestBodyError
+from app.core.exceptions import (
+    ClaudeHttpError,
+    MalformedRequestBodyError,
+    ProxyConnectionError,
+)
+from app.core.http_client import OAuthSession
 from app.processors.claude_ai import ClaudeAIContext
 from app.processors.claude_ai.claude_api_processor import ClaudeAPIProcessor
 from app.utils.claude_code_identity import HEADER_ORDER, IDENTITY_TEXT, verify_billing
 from app.views.messages_view import MessagesRequestView
-from tests.test_oauth_transport import _StubResponse, _StubSession
+from tests.test_oauth_transport import _FakeRnetClient, _StubResponse, _StubSession
 
 _BODY = {
     "model": "claude-opus-5-5",
@@ -26,6 +33,7 @@ _BODY = {
     "messages": [{"role": "user", "content": "Say hi"}],
 }
 _PROMPT_ID = "0b6f3c1e-7a2d-4c8e-9f10-2a3b4c5d6e7f"
+_PROXY = "http://proxy.test:8080"
 
 
 @pytest.fixture
@@ -42,6 +50,7 @@ def wire(monkeypatch, account):
     """Route the processor to ``account`` and return a function installing a stub session."""
     monkeypatch.setattr(identity, "_version", "2.1.283")
     monkeypatch.setattr(identity, "_pinned", False)
+    monkeypatch.setattr(Account, "save", lambda self: None)  # never touch accounts.json
     monkeypatch.setattr(
         processor_module.cache_service, "process_messages", lambda *_a: (None, [])
     )
@@ -65,6 +74,23 @@ def wire(monkeypatch, account):
         return session
 
     return install
+
+
+@pytest.fixture
+def proxy(monkeypatch):
+    """Route through ``_PROXY``; return the proxies marked unhealthy."""
+    marked = []
+
+    async def get_proxy(**_kw):
+        return _PROXY
+
+    async def mark_unhealthy(proxy_url, reason="unknown"):
+        marked.append(proxy_url)
+
+    service = processor_module.proxy_service
+    monkeypatch.setattr(service, "get_proxy", get_proxy)
+    monkeypatch.setattr(service, "mark_unhealthy", mark_unhealthy)
+    return marked
 
 
 def _ok(request_id="req_011CAbc", payload=None):
@@ -249,3 +275,29 @@ async def test_a_400_without_a_string_message_is_still_an_http_error(wire):
     with pytest.raises(ClaudeHttpError):
         await ClaudeAPIProcessor().process(_context())
     assert len(session.calls) == 1
+
+
+def _transport(monkeypatch, client):
+    monkeypatch.setattr(processor_module.settings, "request_retry_interval", 0)
+    monkeypatch.setattr(
+        processor_module, "create_oauth_session", lambda **_kw: OAuthSession(client)
+    )
+
+
+async def test_a_reset_after_the_retry_marks_the_proxy(wire, proxy, monkeypatch):
+    client = _FakeRnetClient(
+        RnetConnectionResetError("reset"), RnetConnectionResetError("reset again")
+    )
+    _transport(monkeypatch, client)
+    with pytest.raises(ProxyConnectionError):
+        await ClaudeAPIProcessor().process(_context())
+    assert len(client.calls) == 2
+    assert proxy == [_PROXY]
+
+
+async def test_a_timeout_does_not_mark_the_proxy(wire, proxy, monkeypatch):
+    client = _FakeRnetClient(RnetTimeoutError("slow generation"))
+    _transport(monkeypatch, client)
+    with pytest.raises(RnetTimeoutError):
+        await ClaudeAPIProcessor().process(_context())
+    assert proxy == []
