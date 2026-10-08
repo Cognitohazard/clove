@@ -29,9 +29,10 @@ import re
 import uuid
 from dataclasses import dataclass
 
-import httpx
 import xxhash
 from loguru import logger
+
+from app.core.http_client import create_plain_session
 
 # --------------------------------------------------------------------------
 # Captured constants (Claude Code 2.1.283)
@@ -152,7 +153,7 @@ _VERSION_GATE = re.compile(r"version (\d+\.\d+\.\d+) or newer is required")
 # --------------------------------------------------------------------------
 
 NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
-_NPM_TIMEOUT_SECONDS = 10.0
+_NPM_TIMEOUT_SECONDS = 10
 
 _version = FALLBACK_CLI_VERSION
 _pinned = False
@@ -224,15 +225,19 @@ async def refresh_cli_version() -> None:
 
     Any failure (network, HTTP status, JSON, malformed version) is logged and
     the current value is kept. The fetch deliberately bypasses Clove's proxy
-    settings; an ``HTTP(S)_PROXY`` from the environment still applies.
+    settings (``proxy=None``); an ``HTTP(S)_PROXY`` from the environment still
+    applies.
     """
     if _pinned:
         return
     try:
-        async with httpx.AsyncClient(timeout=_NPM_TIMEOUT_SECONDS) as client:
-            response = await client.get(NPM_LATEST_URL)
-            response.raise_for_status()
-            data = response.json()
+        async with create_plain_session(
+            timeout=_NPM_TIMEOUT_SECONDS, proxy=None
+        ) as session:
+            response = await session.request("GET", NPM_LATEST_URL)
+            if response.status_code != 200:
+                raise ValueError(f"HTTP {response.status_code}")
+            data = await response.json()
     except Exception as exc:
         logger.warning(
             f"Claude Code version refresh failed, keeping {_version}: {exc!r}"

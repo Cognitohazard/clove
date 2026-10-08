@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from app.core.config import settings
 from app.utils import claude_code_identity as cci
 
 FIXTURE = json.loads(
@@ -825,21 +826,22 @@ def _fresh_version_state(monkeypatch):
 
 
 def _fake_npm(monkeypatch, handler):
-    """Route refresh_cli_version's httpx client through ``handler``; return seen URLs."""
+    """Route refresh_cli_version's plain (httpx) session through ``handler``.
+
+    Returns ``(url, proxy)`` for every request sent.
+    """
     seen = []
     real_client = httpx.AsyncClient
 
-    def recording_handler(request):
-        seen.append(str(request.url))
-        return handler(request)
+    def client(**kwargs):
+        def recording_handler(request):
+            seen.append((str(request.url), kwargs.get("proxy")))
+            return handler(request)
 
-    monkeypatch.setattr(
-        httpx,
-        "AsyncClient",
-        lambda **kwargs: real_client(
-            transport=httpx.MockTransport(recording_handler), **kwargs
-        ),
-    )
+        return real_client(transport=httpx.MockTransport(recording_handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    monkeypatch.setattr(settings, "request_retry_interval", 0)
     return seen
 
 
@@ -877,7 +879,7 @@ async def test_pin_blocks_refresh_and_bump(monkeypatch):
     cci.pin_cli_version(None)
     await cci.refresh_cli_version()
     assert cci.cli_version() == "9.9.9"
-    assert seen == [cci.NPM_LATEST_URL]
+    assert seen == [(cci.NPM_LATEST_URL, None)]  # never through Clove's proxy
 
 
 def test_unpin_never_leaves_the_version_below_the_fallback(monkeypatch):
