@@ -1,3 +1,5 @@
+import secrets
+import time
 from typing import List, Optional
 from enum import Enum
 from datetime import datetime
@@ -25,11 +27,42 @@ class AuthType(str, Enum):
 
 @dataclass
 class OAuthToken:
-    """Encapsulates OAuth credentials for an account."""
+    """Encapsulates OAuth credentials for an account.
+
+    ``account_uuid`` names the user the token was issued to (``metadata.user_id``
+    on the wire). It lives on the token so that replacing the token can never
+    pair it with another user's uuid; ``""`` when unknown.
+    """
 
     access_token: str
     refresh_token: str
     expires_at: float  # Unix timestamp
+    account_uuid: str = ""
+
+    @classmethod
+    def from_token_response(
+        cls, data: dict, previous: Optional["OAuthToken"] = None
+    ) -> "OAuthToken":
+        """Build from a token-endpoint response, or a pasted token with ``expires_at``.
+
+        ``account.uuid`` comes from the response; a refresh response without it
+        keeps ``previous``'s, anything else without it gets ``""``.
+        """
+        account = data.get("account")
+        account_uuid = account.get("uuid") if isinstance(account, dict) else None
+        if not isinstance(account_uuid, str):
+            account_uuid = previous.account_uuid if previous else ""
+        expires_at = (
+            data["expires_at"]
+            if "expires_at" in data
+            else time.time() + data["expires_in"]
+        )
+        return cls(
+            access_token=data["access_token"],
+            refresh_token=data["refresh_token"],
+            expires_at=expires_at,
+            account_uuid=account_uuid,
+        )
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -37,6 +70,7 @@ class OAuthToken:
             "access_token": self.access_token,
             "refresh_token": self.refresh_token,
             "expires_at": self.expires_at,
+            "account_uuid": self.account_uuid,
         }
 
     @classmethod
@@ -46,6 +80,7 @@ class OAuthToken:
             access_token=data["access_token"],
             refresh_token=data["refresh_token"],
             expires_at=data["expires_at"],
+            account_uuid=data.get("account_uuid") or "",
         )
 
 
@@ -61,8 +96,12 @@ class Account:
         auth_type: AuthType = AuthType.COOKIE_ONLY,
         available_models: Optional[List[str]] = None,
         available_models_fetched_at: Optional[datetime] = None,
+        device_id: Optional[str] = None,
     ):
         self.organization_uuid = organization_uuid
+        # The Claude Code "device" this account presents on the OAuth path
+        # (metadata.user_id). Generated once and persisted; the CLI's is 32 bytes hex.
+        self.device_id = device_id or secrets.token_hex(32)
         self.capabilities = capabilities
         self._cookie_value = cookie_value
         self.status = AccountStatus.VALID
@@ -175,6 +214,7 @@ class Account:
                 else None
             ),
             "oauth_upgrade_blocked_reason": self.oauth_upgrade_blocked_reason,
+            "device_id": self.device_id,
         }
 
     @classmethod
@@ -190,6 +230,7 @@ class Account:
             available_models_fetched_at=(
                 datetime.fromisoformat(fetched_at_raw) if fetched_at_raw else None
             ),
+            device_id=data.get("device_id"),
         )
         account.status = AccountStatus(data["status"])
         account.last_used = datetime.fromisoformat(data["last_used"])

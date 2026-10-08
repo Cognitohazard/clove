@@ -11,20 +11,48 @@ PII and a live authorization code).
 Without CLOVE_SK it still probes the token endpoints, which needs no credential:
 a live endpoint rejects a bogus grant *semantically* ("invalid_grant"), a retired
 one 404s. That alone distinguishes "they moved the URL" from "our payload is wrong".
+
+``--messages`` is the real-token smoke of the Claude Code identity layer (required
+before merging changes to it). It sends through the same transport and builders as
+the OAuth path and exits non-zero on any failure:
+
+    CLOVE_OAT=sk-ant-oat01-... uv run python scripts/probe_oauth.py --messages
+
+- non-streaming and streaming 200 on a version-gated model (``--model``);
+- a second turn over a cached system prefix reads the cache
+  (``cache_read_input_tokens > 0``) although its billing block differs;
+- ``GET /v1/models`` and the app's model discovery.
 """
 
+import argparse
 import asyncio
 import json
 import os
+import secrets
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.core.account import Account, AuthType, OAuthToken  # noqa: E402
 from app.core.config import settings  # noqa: E402
-from app.core.http_client import create_plain_session, create_session  # noqa: E402
+from app.core.http_client import (  # noqa: E402
+    create_oauth_session,
+    create_plain_session,
+    create_session,
+)
 from app.services.oauth import oauth_authenticator  # noqa: E402
+from app.services.proxy import proxy_service  # noqa: E402
+from app.utils.claude_code_identity import (  # noqa: E402
+    build_api_headers,
+    build_messages_headers,
+    bump_cli_version,
+    cli_version,
+    finalize_messages_body,
+    parse_version_gate,
+    pin_cli_version,
+)
 
 TOKEN_URLS = [
     "https://claude.ai/v1/oauth/token",
@@ -155,14 +183,182 @@ async def probe_cookie_chain(session_key: str) -> None:
             _show("token exchange", response.status_code, body)
 
 
-async def main() -> None:
+def _check(label: str, ok: bool, detail: str) -> bool:
+    print(f"  [{'PASS' if ok else 'FAIL'}] {label}: {detail}")
+    return ok
+
+
+class _MessagesProbe:
+    """Sends /v1/messages the way the OAuth path does, with a throwaway device."""
+
+    def __init__(self, token: str, session):
+        self.token = token
+        self.session = session
+        self.device_id = secrets.token_hex(32)
+        base = settings.claude_api_baseurl.encoded_string().rstrip("/")
+        self.url = f"{base}/v1/messages?beta=true"
+
+    async def send(self, body: dict, prev_request_id=None):
+        """(status, request-id, body text); a version-gate 400 bumps and retries once."""
+        for attempt in (1, 2):
+            finalized = finalize_messages_body(
+                body,
+                device_id=self.device_id,
+                account_uuid="",
+                prev_request_id=prev_request_id,
+            )
+            headers = build_messages_headers(
+                self.token,
+                client_beta_header=None,
+                session_id=finalized.session_id,
+                prompt_id=finalized.prompt_id,
+                cli_version=finalized.cli_version,
+            )
+            response = await self.session.request(
+                "POST", self.url, headers=headers, data=finalized.body_bytes
+            )
+            text = await _body(response)
+            gate = parse_version_gate(text) if response.status_code == 400 else None
+            if (
+                attempt == 1
+                and gate
+                and (bump_cli_version(gate) or cli_version() != finalized.cli_version)
+            ):
+                print(f"  version gate: {text[:200]} -> retrying as {cli_version()}")
+                continue
+            return response.status_code, response.headers.get("request-id"), text
+
+
+def _usage(text: str) -> dict:
+    try:
+        return json.loads(text).get("usage") or {}
+    except ValueError:
+        return {}
+
+
+async def probe_messages(token: str, model: str) -> bool:
+    if settings.claude_code_version:
+        pin_cli_version(settings.claude_code_version)
+    proxy = await proxy_service.get_proxy()
+    print(
+        f"=== OAuth /v1/messages as Claude Code {cli_version()} "
+        f"(model {model}, proxy {proxy or 'none'}) ==="
+    )
+    probe = _MessagesProbe(token, create_oauth_session(proxy=proxy))
+    hello = [{"role": "user", "content": "Say hi in one word."}]
+    ok = True
+
+    status, _, text = await probe.send(
+        {"model": model, "max_tokens": 16, "messages": hello}
+    )
+    ok &= _check(
+        "non-streaming",
+        status == 200,
+        f"HTTP {status} {text[:300] if status != 200 else ''}",
+    )
+
+    status, _, text = await probe.send(
+        {"model": model, "max_tokens": 16, "stream": True, "messages": hello}
+    )
+    ok &= _check(
+        "streaming",
+        status == 200 and "message_stop" in text,
+        f"HTTP {status} {text[:300] if status != 200 else 'message_stop seen'}",
+    )
+
+    # A fresh prefix well above every model's minimum cacheable length. Turn 2
+    # changes the billing block (new prompt id, cch, cc_prev_req) but not the prefix.
+    nonce = secrets.token_hex(8)
+    prefix = "".join(
+        f"Cache probe {nonce}, line {i}: this system prompt stays identical across turns.\n"
+        for i in range(600)
+    )
+    system = [{"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}}]
+    turn1 = {"model": model, "max_tokens": 16, "system": system, "messages": hello}
+    status, request_id, text = await probe.send(turn1)
+    ok &= _check(
+        "cache turn 1",
+        status == 200,
+        f"HTTP {status} usage={_usage(text) if status == 200 else text[:300]}",
+    )
+    turn2 = {
+        **turn1,
+        "messages": hello
+        + [
+            {"role": "assistant", "content": "Hi."},
+            {"role": "user", "content": "Now say bye in one word."},
+        ],
+    }
+    status, _, text = await probe.send(turn2, prev_request_id=request_id)
+    usage = _usage(text)
+    ok &= _check(
+        "cache turn 2 reads the prefix",
+        status == 200 and (usage.get("cache_read_input_tokens") or 0) > 0,
+        f"HTTP {status} usage={usage if status == 200 else text[:300]}",
+    )
+
+    base = settings.claude_api_baseurl.encoded_string().rstrip("/")
+    response = await probe.session.request(
+        "GET",
+        f"{base}/v1/models",
+        headers=build_api_headers(token, cli_version=cli_version()),
+        params={"limit": "1000"},
+    )
+    text = await _body(response)
+    ids = [m.get("id") for m in _json_list(text)]
+    ok &= _check(
+        "GET /v1/models",
+        response.status_code == 200 and bool(ids),
+        f"HTTP {response.status_code} {len(ids)} models, {model} listed: {model in ids}",
+    )
+
+    account = Account(
+        organization_uuid="probe",
+        oauth_token=OAuthToken(token, "", 0.0),
+        auth_type=AuthType.OAUTH_ONLY,
+    )
+    discovered = await oauth_authenticator.fetch_available_models(account)
+    ok &= _check(
+        "model discovery",
+        bool(discovered),
+        f"{len(discovered or [])} models",
+    )
+    return ok
+
+
+def _json_list(text: str) -> list:
+    try:
+        data = json.loads(text).get("data")
+    except (ValueError, AttributeError):
+        return []
+    return [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
+
+
+async def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument(
+        "--messages",
+        action="store_true",
+        help="real-token smoke of the OAuth path; needs CLOVE_OAT",
+    )
+    parser.add_argument("--model", default="claude-opus-5-5")
+    args = parser.parse_args()
+
+    if args.messages:
+        token = os.environ.get("CLOVE_OAT")
+        if not token:
+            print("CLOVE_OAT is not set (an sk-ant-oat01-... access token).")
+            return 2
+        return 0 if await probe_messages(token, args.model) else 1
+
     await probe_token_endpoints()
     session_key = os.environ.get("CLOVE_SK")
     if not session_key:
         print("CLOVE_SK not set — skipping the cookie chain.")
-        return
+        return 0
     await probe_cookie_chain(session_key)
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

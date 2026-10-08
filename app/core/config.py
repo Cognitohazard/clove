@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 from app.models.proxy import ProxySettings, ProxyMode
 
+
 class Settings(BaseSettings):
     """Application settings with environment variable and JSON config support."""
 
@@ -153,6 +154,16 @@ class Settings(BaseSettings):
     claude_api_baseurl: HttpUrl = Field(
         default="https://api.anthropic.com", env="CLAUDE_API_BASEURL"
     )
+    # Env only, deliberately not in the settings API: an admin settings save
+    # rewrites config.json and drops keys it does not know.
+    claude_code_version: Optional[str] = Field(
+        default=None,
+        env="CLAUDE_CODE_VERSION",
+        description=(
+            "Pin the Claude Code version (MAJOR.MINOR.PATCH) presented on the OAuth "
+            "path; unset, it is the captured CLI version"
+        ),
+    )
 
     # Cookies
     cookies: List[str] | str = Field(
@@ -166,7 +177,10 @@ class Settings(BaseSettings):
     inject_claude_code_system_prompt: bool = Field(
         default=True,
         env="INJECT_CLAUDE_CODE_SYSTEM_PROMPT",
-        description="Prepend the legacy Claude Code identity prompt on the OAuth/API path",
+        description=(
+            "Add the Claude Code identity system block on the OAuth path; false omits "
+            "only that block (billing block, metadata.user_id, headers and TLS always apply)"
+        ),
     )
     use_real_roles: bool = Field(default=True, env="USE_REAL_ROLES")
     human_name: str = Field(default="Human", env="CUSTOM_HUMAN_NAME")
@@ -319,9 +333,7 @@ class Settings(BaseSettings):
         description="OAuth redirect URI for authorization flow",
     )
 
-    @field_validator(
-        "api_keys", "admin_api_keys", "cookies", "pad_tokens"
-    )
+    @field_validator("api_keys", "admin_api_keys", "cookies", "pad_tokens")
     def parse_comma_separated(cls, v: str | List[str]) -> List[str]:
         """Parse comma-separated string."""
         if isinstance(v, str):
@@ -335,6 +347,7 @@ class Settings(BaseSettings):
         "oauth_authorize_url",
         "oauth_token_url",
         "oauth_redirect_uri",
+        "claude_code_version",
         mode="before",
     )
     def strip_surrounding_quotes(cls, v: Any) -> Any:

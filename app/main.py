@@ -18,6 +18,7 @@ from app.services.session import session_manager
 from app.services.tool_call import tool_call_manager
 from app.services.cache import cache_service
 from app.services.proxy import proxy_service
+from app.utils.claude_code_identity import pin_cli_version
 
 
 def migrate_proxy_config():
@@ -74,6 +75,11 @@ async def lifespan(app: FastAPI):
 
     # 迁移旧的代理配置
     migrate_proxy_config()
+
+    # Claude Code version presented on the OAuth path; the default is the
+    # captured CLI version (FALLBACK_CLI_VERSION)
+    if settings.claude_code_version:
+        pin_cli_version(settings.claude_code_version)
 
     # Load accounts
     account_manager.load_accounts()

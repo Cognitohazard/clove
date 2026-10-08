@@ -2,7 +2,7 @@
 
 Fork of [mirrorange/clove](https://github.com/mirrorange/clove). Earlier development tracked the intermediate fork [Huan-zhaojun/clove](https://github.com/Huan-zhaojun/clove) (itself a fork of mirrorange); those changes are already merged in here.
 
-This fork tries to keep the OAuth API path as close to a transparent Anthropic proxy as practical: preserve the original Messages API request body, pass through client API fields and beta headers, and avoid proxy-side behavior that can change upstream semantics.
+This fork tries to keep the OAuth API path as close to a transparent Anthropic proxy as practical: keep the client's Messages API fields, pass through client beta headers, and avoid proxy-side behavior that can change upstream semantics. On the wire, every OAuth call goes out as the Claude Code CLI would send it; see `docs/claude-code-wire-identity.md`.
 
 For base project documentation (features, limitations, API usage, configuration), see the upstream READMEs.
 
@@ -34,23 +34,29 @@ docker compose up -d
 
 ### Claude Code Prompt Toggle
 
-Configurable `inject_claude_code_system_prompt` setting (default: `true`) to control whether the legacy "You are Claude Code" system prompt is injected into API requests. Allows disabling it for non-Claude-Code clients.
+Configurable `inject_claude_code_system_prompt` setting (default: `true`). It controls only the "You are Claude Code, Anthropic's official CLI for Claude." identity block that the OAuth path adds to `system`; `false` omits that block. The rest of the Claude Code identity layer (billing block, `metadata.user_id`, CLI headers and TLS fingerprint) always applies; see `docs/claude-code-wire-identity.md`.
 
-**Where:** `app/core/config.py`, `app/processors/claude_ai/claude_api_processor.py`
+**Where:** `app/core/config.py`, `app/utils/claude_code_identity.py`, `app/processors/claude_ai/claude_api_processor.py`
 
-### Messages API Single-Attempt Proxying
+### Presented Claude Code Version
 
-`POST /v1/messages` now makes exactly one upstream Messages API attempt on the OAuth path. The route-level retry wrapper was removed, and the OAuth Messages session overrides HTTP transport retries with `request_retries=1`. This avoids duplicate upstream generations when a streamed request fails after Anthropic has already accepted it.
+The OAuth path presents the Claude Code version its wire shape was captured from (`FALLBACK_CLI_VERSION`, currently `2.1.293`). It does not follow npm's latest release at runtime: a newer CLI may change the wire shape, and a new version number on the old shape is a combination no real CLI sends. `CLAUDE_CODE_VERSION` (environment only) overrides it and turns off the automatic bump. A `400 ... version Y or newer is required` raises the version to Y for the life of the process and retries once. The daily drift workflow is what signals a new CLI: re-capture with `scripts/capture_claude_code.py --write`, update the constants in `app/utils/claude_code_identity.py` and the fixture, and run the tests. The 2.1.293 billing block reads `cc_version`, `cc_entrypoint`, `cch`, `cc_prev_req` (from a session's second main request on), `cc_prompt_id`, `cc_turn_origin`, `cc_prompt_index`, `cc_turn_index`. The CLI numbers its turns in `cc_turn_index` and its human-typed turns in `cc_prompt_index`, and a tool loop stays in its turn; every turn Clove sends is human-typed, so both carry the number of human turns (user messages without a `tool_result` block) and are omitted when there is none.
 
-Shared HTTP sessions still support configurable transport retries through `REQUEST_RETRIES` and `REQUEST_RETRY_INTERVAL`, so other callers can keep retry behavior without forcing it onto Messages API proxying.
+**Where:** `app/utils/claude_code_identity.py`, `.github/workflows/claude-code-drift.yml`, `scripts/capture_claude_code.py`
+
+### Messages API Retry Policy
+
+`POST /v1/messages` has no route-level retry wrapper, so a failed generation is not silently re-run. The OAuth path re-sends a request in two cases only, once each: when the connection is closed or reset before a response arrives (as the Claude Code CLI's SDK does; the retried attempt carries `X-Stainless-Retry-Count: 1`, and because the first attempt may already have reached Anthropic, that request can be generated twice), and after a `400 ... version Y or newer is required`, with the presented CLI version raised to Y (unless `CLAUDE_CODE_VERSION` pins it).
+
+Shared HTTP sessions for other callers keep their configurable transport retries (`REQUEST_RETRIES`, `REQUEST_RETRY_INTERVAL`).
 
 **Where:** `app/api/routes/claude.py`, `app/core/http_client.py`, `app/processors/claude_ai/claude_api_processor.py`
 
 ### OAuth Beta Header Passthrough
 
-OAuth Messages and Models proxy requests inject the required `oauth-2025-04-20` beta header and merge any client-provided `anthropic-beta` values without duplicating entries. Optional betas such as `context-1m-2025-08-07` should be supplied by the client when needed instead of being forced globally by the proxy. The header set is built by a single shared helper (`build_oauth_headers`) so the messages route, models route, and account model discovery never drift out of sync.
+Every OAuth call sends the Claude Code CLI's base betas (`claude-code-20250219,oauth-2025-04-20`) followed by the client's own `anthropic-beta` values, deduplicated and in order. Optional betas such as `context-1m-2025-08-07` should be supplied by the client when needed instead of being forced globally by the proxy. The identity layer's header builders serve the messages route, the models route, model discovery and the rate-limit probe alike; see `docs/claude-code-wire-identity.md`.
 
-**Where:** `app/utils/oauth_headers.py`, `app/processors/claude_ai/claude_api_processor.py`, `app/api/routes/models.py`
+**Where:** `app/utils/claude_code_identity.py` (`build_messages_headers`, `build_api_headers`)
 
 ### Messages API Field Transparency
 
@@ -66,7 +72,7 @@ A 30-fixture contract test suite pins the request shapes upstream documents (inc
 
 The `/v1/messages` flow used to be a flat 12-processor pipeline glued together with `stop_pipeline` and `skip_processors` flags, plus defensive `if context.response: return context` guards in every processor. It's now a `MessagesHandler` with three named phases — pre-handlers (tavern test, tool-result resumption), strategy (OAuth → Web fallback), and a post-chain that only runs when there's an SSE stream to translate. Control flow is in one file; processors no longer carry orchestration logic.
 
-`MessagesRequestView` provides cheap raw-JSON accessors plus an opt-in parsed model so the OAuth raw-body passthrough doesn't pay for typed access it doesn't need.
+`MessagesRequestView` provides cheap raw-JSON accessors plus an opt-in parsed model so the OAuth path, which works on the raw JSON, doesn't pay for typed access it doesn't need.
 
 **Where:** `app/handlers/messages_handler.py`, `app/views/messages_view.py`, `app/processors/claude_ai/`
 
@@ -145,13 +151,11 @@ Removed the `is_pro` gate so Free-tier accounts can use extended thinking (chain
 
 **Where:** `app/processors/claude_ai/claude_api_processor.py`
 
-### Transparent OAuth Proxy Passthrough
+### OAuth Request Body Fidelity
 
-OAuth mode now forces transparent passthrough for Messages API requests: the processor forwards the original raw request body to Anthropic instead of rebuilding it from Pydantic models. This fixes cache-scope requests from upstream because fields such as `cache_control.scope` are preserved exactly, even though the local cache model only needs to inspect `type` and `ttl`.
+The OAuth path never rebuilds a Messages request from Pydantic models, which used to drop fields such as `cache_control.scope` (upstream's `CacheControl` allows no extra fields). It starts from the client's raw JSON, keeps every client field and the client's key order, adds the Claude Code identity fields (billing and identity blocks in `system`, `metadata.user_id`; a client's own billing block and `user_id` are replaced) and re-serializes the body compactly; the raw bytes are no longer forwarded verbatim. Where local processing still needs models, they inherit a project `BaseModel` with `extra="allow"`. See `docs/claude-code-wire-identity.md`.
 
-The upstream round-trip happens on the OAuth path: FastAPI parses the request into `MessagesAPIRequest`, then `ClaudeAPIProcessor` sends `context.messages_api_request.model_dump_json(exclude_none=True)`. Because upstream `CacheControl` does not allow extra fields, `scope` can be dropped during parsing/serialization before the request reaches Anthropic. This fork avoids that path by forwarding the raw body, and Pydantic models also inherit a project `BaseModel` with `extra="allow"` so parsed API data keeps unknown fields where local processing still needs models.
-
-**Where:** `app/models/claude.py` (BaseModel), `app/processors/claude_ai/claude_api_processor.py`
+**Where:** `app/views/messages_view.py`, `app/utils/claude_code_identity.py`, `app/models/claude.py` (BaseModel)
 
 ### Claude API Spec Alignment
 

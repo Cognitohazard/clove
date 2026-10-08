@@ -2,6 +2,7 @@
 """Build script for Clove - builds frontend and creates Python wheel."""
 
 import argparse
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -95,9 +96,7 @@ def build_wheel():
     """Build the Python wheel."""
     print("\n🐍 Building Python wheel...")
 
-    try:
-        import build
-    except ImportError:
+    if importlib.util.find_spec("build") is None:
         print("  📦 Installing build tool...")
         run_command([sys.executable, "-m", "pip", "install", "build"])
 

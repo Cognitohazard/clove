@@ -1,0 +1,160 @@
+name: Claude Code Drift
+
+on:
+  schedule:
+    - cron: "17 4 * * *" # Daily at 04:17 UTC
+  workflow_dispatch:
+
+# The job that runs the downloaded Claude Code binary can only read the repo;
+# the job that files issues never checks out or executes anything, it only
+# reads the capture job's text artifact.
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          # This job runs a downloaded binary: never let it write a shared cache.
+          enable-cache: false
+
+      - name: Sync dependencies
+        run: uv sync --extra rnet
+
+      - name: Work around the hatch force-include dev quirk
+        # See docs/hatch-build-issue.md -- app/static is build output, not
+        # tracked, and hatchling's editable-install check wants it to exist.
+        run: mkdir -p app/static app/locales
+
+      - name: Pre-install mitmproxy
+        run: uvx --from mitmproxy mitmdump --version
+
+      - name: Run the drift harness
+        # Exit codes: 0 match, 1 drift, 2 unavailable, 3 harness error. They
+        # are recorded, never raised, so the artifact is always uploaded; the
+        # step timeout leaves room for the upload if the harness hangs.
+        continue-on-error: true
+        timeout-minutes: 25
+        run: |
+          mkdir -p drift
+          run_harness() {
+            local name=$1
+            shift
+            local code=0
+            uv run python scripts/capture_claude_code.py "$@" > "drift/$name.txt" 2>&1 || code=$?
+            echo "$name=$code" >> drift/exit-codes.txt
+            echo "## capture_claude_code.py $* (exit $code)"
+            cat "drift/$name.txt"
+          }
+          run_harness check --check --version latest
+          run_harness clove --clove
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: drift-capture
+          path: drift/
+          retention-days: 14
+
+  report:
+    needs: capture
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: drift-capture
+          path: drift
+
+      - name: File or update the issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CAPTURE_RESULT: ${{ needs.capture.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # Exit 1 -> the drift issue; 2, 3, anything else or a missing code ->
+          # the harness issue. Run names are fixed here, never read from the
+          # artifact, so its content can't pick which files get posted.
+          : > drift-report.txt
+          : > harness-report.txt
+          for name in check clove; do
+            code=$(sed -n "s/^$name=\([0-9][0-9]*\)$/\1/p" drift/exit-codes.txt 2>/dev/null | tail -n 1 || true)
+            case "$code" in
+              0) continue ;;
+              1) target=drift-report.txt ;;
+              *) target=harness-report.txt ;;
+            esac
+            echo "## $name (exit ${code:-none; capture job result: $CAPTURE_RESULT})" >> "$target"
+            cat "drift/$name.txt" >> "$target" 2>/dev/null || echo "(no output)" >> "$target"
+            echo >> "$target"
+          done
+
+          post() {
+            local label=$1 title=$2 color=$3 report=$4
+            [ -s "$report" ] || return 0
+            # Drop run-specific noise so an unchanged result hashes the same;
+            # drop CRs (a lone CR is a Markdown line ending) and indent every
+            # line into one code block so nothing in the output can end it;
+            # stay under GitHub's 65536-character body limit. Truncate from a
+            # file, not a pipe: `head` closing early would SIGPIPE the writer.
+            tr -d '\r' < "$report" \
+              | sed -E -e 's#/tmp/[^ ]+#<tmp>#g' \
+                       -e 's#127\.0\.0\.1:[0-9]+#127.0.0.1:<port>#g' \
+                       -e 's# at 0x[0-9a-f]+# at 0x?#g' \
+                       -e 's/^/    /' > full.txt
+            head -c 60000 full.txt > body.txt
+            local sha
+            sha=$(sha256sum body.txt | cut -d' ' -f1)
+            {
+              echo "<!-- drift-sha256: $sha -->"
+              echo "Run: $RUN_URL"
+              echo
+              cat body.txt
+            } > post.md
+
+            gh label create "$label" --repo "$REPO" --color "$color" \
+              --description "$title" 2>/dev/null || true
+            local issue
+            issue=$(gh issue list --repo "$REPO" --label "$label" --state open \
+              --json number --jq '.[0].number // empty')
+            if [ -z "$issue" ]; then
+              gh issue create --repo "$REPO" --title "$title" --label "$label" --body-file post.md
+              return
+            fi
+            # The latest marker across the issue body and this workflow's own
+            # comments, in order (anyone can comment, so others don't count).
+            local last
+            last=$( { gh issue view "$issue" --repo "$REPO" --json body --jq .body
+                      gh api --paginate "repos/$REPO/issues/$issue/comments" \
+                        --jq '.[] | select(.user.login == "github-actions[bot]") | .body'
+                    } | grep -o 'drift-sha256: [0-9a-f]*' | tail -n 1 | cut -d' ' -f2 || true)
+            if [ "$last" = "$sha" ]; then
+              echo "$label: output unchanged since the last report on #$issue; not commenting"
+            else
+              gh issue comment "$issue" --repo "$REPO" --body-file post.md
+            fi
+          }
+
+          post claude-code-drift "Claude Code CLI fingerprint drift" FBCA04 drift-report.txt
+          post claude-code-harness "Claude Code drift harness failure" D93F0B harness-report.txt
+
+          # Keep the run red whenever something was reported.
+          if [ -s drift-report.txt ] || [ -s harness-report.txt ]; then
+            exit 1
+          fi

@@ -5,28 +5,15 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from app.core.config import settings
-from app.core.http_client import RequestException, create_session
+from app.core.http_client import OAUTH_TRANSPORT_ERRORS, create_oauth_session
 from app.dependencies.auth import AuthDep
 from app.core.exceptions import NoAccountsAvailableError, ProxyConnectionError
 from app.services.account import account_manager
 from app.services.proxy import proxy_service
-from app.utils.oauth_headers import build_oauth_headers
+from app.utils.claude_code_identity import build_api_headers, cli_version
 
 
 router = APIRouter()
-
-
-def _prepare_headers(access_token: str, original_request: Request) -> dict[str, str]:
-    headers = build_oauth_headers(
-        access_token,
-        client_beta_header=original_request.headers.get("anthropic-beta"),
-        anthropic_version=original_request.headers.get("anthropic-version"),
-        accept="application/json",
-    )
-    request_id = original_request.headers.get("anthropic-request-id")
-    if request_id:
-        headers["anthropic-request-id"] = request_id
-    return headers
 
 
 async def _proxy_models_request(
@@ -40,21 +27,22 @@ async def _proxy_models_request(
 
     upstream_url = settings.claude_api_baseurl.encoded_string().rstrip("/") + path
     proxy_url = await proxy_service.get_proxy(account_id=account.organization_uuid)
-    session = create_session(
-        proxy=proxy_url,
-        timeout=settings.request_timeout,
-        impersonate="chrome",
-        follow_redirects=False,
-    )
+    session = create_oauth_session(proxy=proxy_url, timeout=settings.request_timeout)
 
     try:
+        # The CLI's own headers: a client's anthropic-version / anthropic-request-id
+        # are not forwarded, only its betas.
         response = await session.request(
             "GET",
             upstream_url,
-            headers=_prepare_headers(account.oauth_token.access_token, original_request),
+            headers=build_api_headers(
+                account.oauth_token.access_token,
+                client_beta_header=original_request.headers.get("anthropic-beta"),
+                cli_version=cli_version(),
+            ),
             params=query_params,
         )
-    except RequestException as exc:
+    except OAUTH_TRANSPORT_ERRORS as exc:
         if proxy_url:
             await proxy_service.mark_unhealthy(
                 proxy_url, reason=f"connection error: {type(exc).__name__}"

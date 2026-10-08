@@ -19,6 +19,46 @@ from app.core.exceptions import (
 )
 from app.core.account import Account, AccountStatus, AuthType, OAuthToken
 from app.services.oauth import oauth_authenticator, RefreshResult
+from app.utils.claude_code_identity import (
+    build_messages_headers,
+    cli_version,
+    serialize,
+    user_id_json,
+)
+
+# The quota probe Claude Code 2.1.293 sends at startup: an auxiliary request with
+# no system prompt, no billing block and no prompt id, and its own beta list.
+_QUOTA_PROBE_MODEL = "claude-haiku-4-5-20251001"
+_QUOTA_PROBE_BETAS = (
+    "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,"
+    "thinking-token-count-2026-05-13,context-management-2025-06-27,"
+    "prompt-caching-scope-2026-01-05"
+)
+
+
+def _quota_probe_request(account: Account) -> Tuple[List[Tuple[str, str]], bytes]:
+    """Headers and body of the CLI's quota probe for ``account`` (a fresh session)."""
+    session_id = str(uuid.uuid4())
+    headers = build_messages_headers(
+        account.oauth_token.access_token,
+        client_beta_header=None,
+        session_id=session_id,
+        prompt_id=None,
+        cli_version=cli_version(),
+        request_class="auxiliary",
+        anthropic_beta=_QUOTA_PROBE_BETAS,
+    )
+    body = {
+        "model": _QUOTA_PROBE_MODEL,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "quota"}],
+        "metadata": {
+            "user_id": user_id_json(
+                account.device_id, account.oauth_token.account_uuid, session_id
+            )
+        },
+    }
+    return headers, serialize(body)
 
 
 class AccountManager:
@@ -724,34 +764,21 @@ class AccountManager:
         has_oauth = account.auth_type in (AuthType.OAUTH_ONLY, AuthType.BOTH)
 
         if has_oauth and account.oauth_token:
-            # OAuth 路径：直接 POST /v1/messages（最小请求）
-            from app.core.http_client import create_session
+            # OAuth 路径：发送与 CLI 启动时相同的 quota 探测请求
+            from app.core.http_client import create_oauth_session
 
             proxy_url = await proxy_service.get_proxy(
                 account_id=account.organization_uuid
             )
-            session = create_session(
-                timeout=30,
-                impersonate="chrome",
-                proxy=proxy_url,
-            )
+            session = create_oauth_session(proxy=proxy_url, timeout=30)
             try:
                 api_base = settings.claude_api_baseurl.encoded_string().rstrip("/")
-                url = f"{api_base}/v1/messages"
-                headers = {
-                    "Authorization": f"Bearer {account.oauth_token.access_token}",
-                    "anthropic-beta": "oauth-2025-04-20",
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                }
-                payload = {
-                    "model": "claude-sonnet-4-6",
-                    "max_tokens": 1,
-                    "messages": [{"role": "user", "content": "hi"}],
-                }
-
+                headers, body = _quota_probe_request(account)
                 response = await session.request(
-                    "POST", url, headers=headers, json=payload
+                    "POST",
+                    f"{api_base}/v1/messages?beta=true",
+                    headers=headers,
+                    data=body,
                 )
 
                 if response.status_code == 200:
@@ -764,11 +791,12 @@ class AccountManager:
                     )
                     resets_at = None
                     if reset_header:
+                        # Epoch seconds, parsed as ClaudeAPIProcessor does
                         try:
-                            resets_at = datetime.fromisoformat(
-                                reset_header.replace("Z", "+00:00")
+                            resets_at = datetime.fromtimestamp(
+                                int(reset_header), tz=UTC
                             )
-                        except (ValueError, TypeError):
+                        except ValueError:
                             pass
                     return ("rate_limited", resets_at)
 
@@ -1020,15 +1048,22 @@ class AccountManager:
             with open(accounts_file, "r", encoding="utf-8") as f:
                 accounts_data = json.load(f)
 
+            generated_ids = False
             for organization_uuid, account_data in accounts_data.items():
                 account = Account.from_dict(account_data)
                 self._accounts[organization_uuid] = account
+                generated_ids |= account.device_id != account_data.get("device_id")
 
                 # Rebuild cookie mapping
                 if account.cookie_value:
                     self._cookie_to_uuid[account.cookie_value] = organization_uuid
 
             logger.info(f"Loaded {len(accounts_data)} accounts from {accounts_file}")
+
+            # Persist ids generated for older entries now: a restart before the next
+            # save would otherwise present a new device.
+            if generated_ids:
+                self.save_accounts()
 
         except Exception as e:
             logger.error(f"Failed to load accounts from {accounts_file}: {e}")
