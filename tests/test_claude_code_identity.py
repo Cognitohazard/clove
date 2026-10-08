@@ -500,33 +500,24 @@ def test_finalize_user_id_is_a_json_string_in_cli_key_order():
     assert list(json.loads(user_id)) == FIXTURE["user_id_keys"]
 
 
-def test_finalize_inserts_system_and_metadata_at_cli_positions():
-    with_tools = {"model": "m", "messages": [_user("hi")], "tools": [], "max_tokens": 1}
-    out, _ = _finalize(with_tools)
-    assert list(out) == [
-        "model",
-        "messages",
-        "system",
-        "tools",
-        "metadata",
-        "max_tokens",
-    ]
-
-    without_tools = {
-        "max_tokens": 1,
-        "messages": [_user("hi")],
-        "model": "m",
-        "stream": True,
-    }
-    out, _ = _finalize(without_tools)
-    assert list(out) == [
-        "max_tokens",
-        "messages",
-        "system",
-        "metadata",
-        "model",
-        "stream",
-    ]
+@pytest.mark.parametrize(
+    "keys, want",
+    [
+        (
+            ["model", "messages", "tools", "max_tokens"],
+            ["model", "messages", "system", "tools", "metadata", "max_tokens"],
+        ),
+        (
+            ["max_tokens", "messages", "model", "stream"],
+            ["max_tokens", "messages", "system", "metadata", "model", "stream"],
+        ),
+    ],
+    ids=["with-tools", "without-tools"],
+)
+def test_finalize_inserts_system_and_metadata_at_cli_positions(keys, want):
+    values = {"model": "m", "messages": [_user("hi")], "tools": [], "max_tokens": 1}
+    out, _ = _finalize({key: values.get(key, True) for key in keys})
+    assert list(out) == want
 
 
 def test_finalize_keeps_client_key_order_for_existing_keys():
@@ -715,14 +706,12 @@ def test_finalize_adds_cc_prev_req_between_cch_and_prompt_id():
     assert cci.verify_billing(finalized.body_bytes) == (True, True)
 
 
-def test_finalize_without_prev_request_has_no_cc_prev_req():
-    out, _ = _finalize({"model": "m", "messages": [_user("hi")]}, prev_request_id=None)
-    assert "cc_prev_req" not in out["system"][0]["text"]
-
-
-def test_finalize_drops_a_malformed_prev_request_id():
+@pytest.mark.parametrize(
+    "prev_request_id", [None, "req_x; cc_evil=1"], ids=["absent", "malformed"]
+)
+def test_finalize_without_a_usable_prev_request_has_no_cc_prev_req(prev_request_id):
     out, finalized = _finalize(
-        {"model": "m", "messages": [_user("hi")]}, prev_request_id="req_x; cc_evil=1"
+        {"model": "m", "messages": [_user("hi")]}, prev_request_id=prev_request_id
     )
     assert _billing_pattern(finalized.prompt_id).fullmatch(out["system"][0]["text"])
 
@@ -882,15 +871,14 @@ async def test_pin_blocks_refresh_and_bump(monkeypatch):
     assert seen == [(cci.NPM_LATEST_URL, None)]  # never through Clove's proxy
 
 
-def test_unpin_never_leaves_the_version_below_the_fallback(monkeypatch):
+@pytest.mark.parametrize(
+    "pinned, after", [("1.0.0", cci.FALLBACK_CLI_VERSION), ("9.9.9", "9.9.9")]
+)
+def test_unpin_never_leaves_the_version_below_the_fallback(monkeypatch, pinned, after):
     _fresh_version_state(monkeypatch)
-    cci.pin_cli_version("1.0.0")
+    cci.pin_cli_version(pinned)
     cci.pin_cli_version(None)
-    assert cci.cli_version() == cci.FALLBACK_CLI_VERSION
-
-    cci.pin_cli_version("9.9.9")
-    cci.pin_cli_version(None)
-    assert cci.cli_version() == "9.9.9"
+    assert cci.cli_version() == after
 
 
 def test_pin_rejects_malformed_versions(monkeypatch):
