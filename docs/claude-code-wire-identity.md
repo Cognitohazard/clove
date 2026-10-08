@@ -5,9 +5,9 @@
 `tests/fixtures/claude_code_fingerprint.json` 是抓包得到的结构指纹，由测试钉住两者一致，运行时从不读取。
 重新抓包与漂移检测见 `scripts/capture_claude_code.py` 与 CLAUDE.md「CLI 漂移检测」。
 
-抓包基线：Claude Code **2.1.283**（npm `@anthropic-ai/claude-code-linux-x64`，Bun 原生二进制），交互式
+抓包基线：Claude Code **2.1.293**（npm `@anthropic-ai/claude-code-linux-x64`，Bun 原生二进制），交互式
 `cli` 入口，经本地 mitmproxy、使用伪造的 `sk-ant-oat01-` token，请求全部在本地应答，不触达 Anthropic。
-另有一次两轮对话 + 工具循环的抓包，用于确认 `cc_prev_req` 与 id 的跨轮行为。
+另有多轮对话 + 工具循环的抓包，用于确认 `cc_prev_req`、两个 id 与 `cc_prompt_index` / `cc_turn_index` 的跨轮行为。
 
 ## 适用范围
 
@@ -34,7 +34,7 @@
 | 6 | `X-Stainless-Arch` | `x64` |
 | 7 | `X-Stainless-Lang` | `js` |
 | 8 | `X-Stainless-OS` | `Linux` |
-| 9 | `X-Stainless-Package-Version` | `0.112.1` |
+| 9 | `X-Stainless-Package-Version` | `0.128.0` |
 | 10 | `X-Stainless-Retry-Count` | `0`；传输层重试的那一次为 `1` |
 | 11 | `X-Stainless-Runtime` | `node` |
 | 12 | `X-Stainless-Runtime-Version` | `v26.3.0` |
@@ -106,9 +106,17 @@ TLS 1.2–1.3；`key_shares_limit=2`；`http1_only`。扩展顺序就是 BoringS
 
 `system` 为 `[billing, identity, ...客户端块]`，Clove 插入的两块都不带 `cache_control`（与 CLI 一致）：
 
-- **billing 块**：`x-anthropic-billing-header: cc_version=<version>.<suffix>; cc_entrypoint=cli; cch=<cch>; cc_prev_req=<request-id>; cc_prompt_id=<prompt id>; cc_turn_origin=human;`
+- **billing 块**：`x-anthropic-billing-header: cc_version=<version>.<suffix>; cc_entrypoint=cli; cch=<cch>; cc_prev_req=<request-id>; cc_prompt_id=<prompt id>; cc_turn_origin=human; cc_prompt_index=<n>; cc_turn_index=<n>;`
   - 字段顺序固定；`cc_prev_req` 仅在同一会话的第二个及以后的 main 请求出现，位于 `cch` 与
     `cc_prompt_id` 之间，值为**上一个 main 响应**的 `request-id` 响应头（Clove 代理的请求一律以 main 发出；限流探测不计）
+  - `cc_turn_index` 是 CLI 的轮次序号（每次提交一条输入算一轮，不论由谁发起），`cc_prompt_index` 是其中
+    `cc_turn_origin=human` 的轮次序号；工具循环的 `tool_result` 续请求沿用所在轮次的两个值。2.1.293 抓包：
+    第 1 轮、它的 Read 工具续请求、第 2 轮依次为 `1/1`、`1/1`、`2/2`，无工具的三轮为 `1/1`、`2/2`、`3/3`；
+    CLI 源码里新一轮的值为上一轮 `turnIndex + 1`、`promptIndex + (origin == human ? 1 : 0)`
+  - Clove 发出的轮次都是 `cc_turn_origin=human`，所以两者都取**人类轮数**（与 prompt id 同一个计数：不含
+    `tool_result` 块的 user 消息条数，`role: "system"` 等其它角色的消息不计）；人类轮数为 0 时两个字段都省略，
+    与 CLI 无法定位轮次（轮次序号小于 1）时的行为一致。CLI 在会话被压缩后或恢复缺少轮次信息的会话时也会省略
+    它们，Clove 看不到这些状态，仍按可见的 messages 计数
   - 客户端自带的 billing 块（以 `x-anthropic-billing-header:` 开头）一律丢弃
 - **identity 块**：`You are Claude Code, Anthropic's official CLI for Claude.`
   - 客户端 system 的首个块文本恰为这一行时，保留客户端那块（连同它的 `cache_control`），不再插入我们的
@@ -148,7 +156,7 @@ Clove 无状态地派生这两个 id，并保持 UUIDv4 形态（sha256 → 16 �
 `suffix = sha256("59cf53e54c78" + t[4] + t[7] + t[20] + version).hexdigest()[:3]`。`t` 是第一条 user
 消息的文本：字符串内容，或第一个非系统提醒的 text 块（仅当块以 `<system-reminder>` 开头**且**包含
 `</system-reminder>` 时跳过）。下标按 UTF-16 code unit 计，越界取 `"0"`，孤立代理项按 U+FFFD。
-例：`("Say hi", "2.1.283") -> "a03"`。
+例：`("Say hi", "2.1.283") -> "a03"`，`("Say hi", "2.1.293") -> "2a8"`（均与抓包一致）。
 
 ### cch
 
@@ -169,7 +177,7 @@ CLIProxyAPI（见文末）。
 
 ## 版本
 
-- `cli_version()` 默认是 `FALLBACK_CLI_VERSION`，即抓包版本（当前 `2.1.283`，与 fixture 的 `_cli_version`
+- `cli_version()` 默认是 `FALLBACK_CLI_VERSION`，即抓包版本（当前 `2.1.293`，与 fixture 的 `_cli_version`
   一致）。运行时不跟随 npm：新版 CLI 可能改了线上格式，只换版本号会发出「新版本号 + 旧版本布局」这种真实
   CLI 不会发送的组合
 - Anthropic 按模型设置 CLI 版本门槛（400 `Claude Code X does not support this model; version Y or newer is required`）：
@@ -178,25 +186,26 @@ CLIProxyAPI（见文末）。
   管理页每次保存设置都会重写 `config.json` 并丢掉未知键，写在 `config.json` 里的值下次保存后就没了
 - 升级途径：每日漂移检测（`.github/workflows/claude-code-drift.yml`，抓 npm latest 与 fixture 比对）报出 drift
   后，维护者用 `scripts/capture_claude_code.py --write` 重新抓包，按新指纹更新
-  `app/utils/claude_code_identity.py` 的常量与 fixture，再跑测试。截至 2026-10-07，npm latest 是 2.1.293，
-  已与 2.1.283 不同：billing 块新增 `cc_prompt_index` / `cc_turn_index`，`X-Stainless-Package-Version` 变为
-  `0.128.0`，另有两个新 beta。预期下一步就是一个升级到 2.1.293 的单元
+  `app/utils/claude_code_identity.py` 的常量与 fixture，再跑测试。`--write` 只抓第一个 main 请求；新增或
+  改变语义的 billing 字段要再做一次多轮 + 工具循环的抓包来确认
 
 ## 限流探测
 
-CLI 自己的额度探测：haiku、`max_tokens: 1`、**没有 `system`、没有 billing 块**、没有 prompt id header。
+CLI 自己的额度探测：haiku（`claude-haiku-4-5-20251001`）、`max_tokens: 1`、**没有 `system`、没有 billing 块**、
+没有 prompt id header，`x-claude-code-request-class: auxiliary`，自带一组 beta（2.1.293 与 2.1.283 完全相同）。
 Clove 的 `_probe_rate_limit` 按同样形状发送，经同一传输层。
 
 ## 刻意不复制的部分
 
 以下只在有证据表明上游会校验时再补：
 
-- CLI 的完整 beta 列表（2.1.283 发 16 个，且按模型变化）：Clove 只发两个基础 beta 加客户端自带的
+- CLI 的完整 beta 列表（2.1.293 发 18 个，且按模型变化）：Clove 只发两个基础 beta 加客户端自带的
 - CLI 自己加的 body 字段：`context_management`、`diagnostics`（含 `previous_message_id`）、
   `output_config`、`safeguards` 等；客户端自带的照原样转发
 - 工具续请求上的 `x-claude-code-prev-tool-durations` header
 - CLI 的旁路流量：settings / policy_limits / bootstrap / eval / MCP registry / event_logging 等请求，
-  以及 auxiliary 类 `/v1/messages`（如标题生成，其 billing 块没有 `cc_prompt_id` / `cc_turn_origin`）
+  以及 auxiliary 类 `/v1/messages`（如标题生成，其 billing 块只有 `cc_version` / `cc_entrypoint` / `cch`）
+- CLI 只在特定场景才加的 billing 字段：`cc_workload`、`cc_is_subagent=true`（子 agent 请求）
 - 其它入口形态（`sdk-cli`、VS Code 等），始终是 `cc_entrypoint=cli`
 - macOS 平台 header、token 端点指纹
 - 工具名 MCP 别名、敏感词混淆、删除 `temperature` / `top_p`、把客户端 system 挪进 messages
