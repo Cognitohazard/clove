@@ -27,6 +27,7 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import xxhash
@@ -320,17 +321,27 @@ class _CCHScanner:
         if self.pos != len(self.body):
             raise ValueError(f"unexpected JSON data at byte {self.pos}")
 
-    def normalized(self, body: bytes) -> bytes:
-        """``body`` (same length as the scanned bytes) with the edits applied."""
-        parts = []
+    def _kept(self, body: bytes) -> Iterator[memoryview]:
+        """The slices of ``body`` (same length as the scanned bytes) the edits keep."""
+        view = memoryview(body)
         last = 0
         for start, end in sorted(self.edits):
             if start < last:
                 raise ValueError(f"overlapping cch normalization edit at byte {start}")
-            parts.append(body[last:start])
+            yield view[last:start]
             last = end
-        parts.append(body[last:])
-        return b"".join(parts)
+        yield view[last:]
+
+    def normalized(self, body: bytes) -> bytes:
+        """``body`` (same length as the scanned bytes) with the edits applied."""
+        return b"".join(self._kept(body))
+
+    def digest(self, body: bytes) -> int:
+        """The CLI's seeded xxHash64 of ``normalized(body)``, without building it."""
+        hasher = xxhash.xxh64(seed=_CCH_SEED)
+        for part in self._kept(body):
+            hasher.update(part)
+        return hasher.intdigest()
 
     def _value(self, collect: bool, track: int) -> None:
         self._skip_whitespace()
@@ -491,13 +502,14 @@ def _sign(body_bytes: bytes) -> tuple[int | None, str]:
     scanner.scan()
     offset = _cch_digits_offset(body_bytes, scanner.billing_span)
     unsigned = body_bytes
-    if offset is not None:
-        placeholder = _CCH_PLACEHOLDER.encode()
+    placeholder = _CCH_PLACEHOLDER.encode()
+    if offset is not None and (
+        body_bytes[offset : offset + len(placeholder)] != placeholder
+    ):
         unsigned = (
             body_bytes[:offset] + placeholder + body_bytes[offset + len(placeholder) :]
         )
-    digest = xxhash.xxh64_intdigest(scanner.normalized(unsigned), seed=_CCH_SEED)
-    return offset, f"{digest & 0xFFFFF:05x}"
+    return offset, f"{scanner.digest(unsigned) & 0xFFFFF:05x}"
 
 
 def compute_cch(body_bytes: bytes) -> str:
@@ -517,9 +529,11 @@ def compute_cch(body_bytes: bytes) -> str:
 
 def _uuid4_from(domain: str, *parts: str) -> str:
     """Deterministic id shaped like a random UUIDv4 (version and variant bits forced)."""
-    digest = bytearray(
-        hashlib.sha256("\0".join((domain, *parts)).encode("utf-8")).digest()[:16]
-    )
+    hasher = hashlib.sha256(domain.encode("utf-8"))
+    for part in parts:
+        hasher.update(b"\0")
+        hasher.update(part.encode("utf-8"))
+    digest = bytearray(hasher.digest()[:16])
     digest[6] = (digest[6] & 0x0F) | 0x40
     digest[8] = (digest[8] & 0x3F) | 0x80
     return str(uuid.UUID(bytes=bytes(digest)))
