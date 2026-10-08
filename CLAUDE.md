@@ -163,22 +163,22 @@ Dockerfile 使用 `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`，并以 `uv s
 - `MessagesAPIRequest` 内的字段已尽量去掉 `Literal` / 数值上界（`effort`、`thinking.type`、`tool_choice.type`、`cache_control.ttl`、`temperature`、`top_p`、`media_type` 等），避免 FastAPI 在路由层对上游合法值返回 422。新增上游枚举值时无需再改这里
 - `anthropic-beta` 为 `claude-code-20250219,oauth-2025-04-20` 加客户端传入值（去重、保序）
 - `invalid_request_error` 被视为不可重试错误
-- 403 空响应会把当前代理标记为 unhealthy
+- 403 空响应会把当前代理标记为 unhealthy；传输层错误（连接被拒、重试后仍被关闭/重置、TLS 失败）同样标记并返回 `ProxyConnectionError`。超时不标记：`REQUEST_TIMEOUT` 是整个请求的总时长，慢生成不代表代理坏了
 
 ## Claude Code 身份伪装 (identity layer)
 
 Clove 发往 `CLAUDE_API_BASEURL` 的每一次 OAuth 调用（`/v1/messages`、`/v1/models` 代理、`/v1/models` 模型发现、限流探测）在 TLS、HTTP、Header、计费字段四层都与真实 Claude Code CLI 一致。Claude.ai Web 链路和 OAuth token 端点（仍走 plain httpx）不在范围内。线上格式的逐字段说明（billing 字段顺序、header 顺序、TLS profile、刻意不复制的部分）见 `docs/claude-code-wire-identity.md`。
 
 - `app/utils/claude_code_identity.py`：纯函数（`finalize_messages_body` / `build_messages_headers` / `build_api_headers` / `compute_cch` / `verify_billing` 等）加进程内版本状态。其中的常量（`HEADER_ORDER` / `STATIC_HEADERS` / `PLATFORM_HEADERS` / `TLS_PROFILE` / `FALLBACK_CLI_VERSION`）是**运行时唯一真相来源**；测试断言它们与 `tests/fixtures/claude_code_fingerprint.json` 一致，运行时从不读 fixture（Docker 镜像里没有 `tests/`）
-- 传输层：`app/core/http_client.py` 的 `create_oauth_session(proxy)`，rnet 不开浏览器仿真，显式配置 TLS（无 GREASE、ALPN 仅 `http/1.1`、X25519MLKEM768 等）、HTTP/1.1、`orig_headers` 控制 header 顺序与大小写；每个代理 URL 缓存一个 client 以复用连接和 TLS 会话；只用系统信任根
+- 传输层：`app/core/http_client.py` 的 `create_oauth_session(proxy)`，rnet 不开浏览器仿真，显式配置 TLS（无 GREASE、ALPN 仅 `http/1.1`、X25519MLKEM768 等）、HTTP/1.1、`orig_headers` 控制 header 顺序与大小写；每个代理 URL 缓存一个 client 以复用连接和 TLS 会话；只用系统信任根。连接被关闭/重置时在新连接上重试一次，重试那次带 `X-Stainless-Retry-Count: 1`（rnet 分不清失效的复用连接和请求发出后才断开的新连接，所以非幂等的 POST 可能被上游收到两次，CLI 用的 Stainless SDK 也是这样重试的）。依赖 `rnet` extra：没有它时 `create_oauth_session` 抛 `RuntimeError`，不回退到其他 HTTP 客户端，分到 OAuth 账户的请求直接报错；Web 链路不依赖 rnet，没有可用 OAuth 账户时照常回退过去。Docker 镜像始终装有 rnet
 - 所有 OAuth 客户端走同一条路径，不保留"原生 Claude Code 直通"：版本号、UA、Stainless header、`device_id`、`account_uuid`、TLS 一律用 Clove 自己的，避免旧客户端的版本号撞上按模型的版本门禁。但客户端提供的**合法值会被采用**：JSON `metadata.user_id` 里的 v4 `session_id`、v4 `x-claude-code-prompt-id`、`x-claude-code-request-class`；没有时再派生
 - body：在 `view.raw_json` 上插入 billing 块、identity 块和 `metadata.user_id`，紧凑序列化后计算 `cch` 回填。未知字段与客户端键顺序保留，只有新插入的键放到 CLI 的位置；`NaN` / `Infinity` 返回 400
 - `system` = `[billing, identity, ...客户端 system]`：客户端自带的 billing 块被丢弃；客户端 system 的首个块文本恰为 identity 行时，**保留客户端那块（含它的 `cache_control`）**，不再插入我们的；`""` / `[]` 视为缺省
-- billing 块字段顺序为 `cc_version` / `cc_entrypoint` / `cch` / `cc_prev_req` / `cc_prompt_id` / `cc_turn_origin`。`cc_prev_req` 是同一会话上一个上游响应的 `request-id`，取自进程内有界 map（session id → request-id，最多 4096 条，不持久化），重启后每个会话的第一个请求没有该字段
+- billing 块字段顺序为 `cc_version` / `cc_entrypoint` / `cch` / `cc_prev_req` / `cc_prompt_id` / `cc_turn_origin`。`cc_prev_req` 是同一会话上一个上游响应的 `request-id`，取自进程内有界 map（键是实际发出的 session id，采用了客户端的 id 时就是那个 id；最多 4096 条，不持久化），重启后每个会话的第一个请求没有该字段
 - `metadata.user_id` 是 **JSON 字符串**，键顺序 `device_id` / `account_uuid` / `session_id`。`device_id` 每账户生成一次并随账户持久化（`NO_FILESYSTEM_MODE` 下每次重启都会变；回滚到旧镜像会丢失后重新生成）；`account_uuid` 存在 `OAuthToken` 上，来自 token 响应的 `account.uuid`，粘贴的 token 为 `""`，refresh 响应不带时沿用原值
 - session id / prompt id 无状态派生且保持 UUIDv4 形态：session id 基于 `device_id` + 去掉 `cache_control` 的 `messages[0]`，prompt id 基于 session id + 人类轮数（不含 `tool_result` 块的 user 消息才算新一轮）。裁剪或压缩旧消息的客户端会让 id 变化
 - `INJECT_CLAUDE_CODE_SYSTEM_PROMPT=false` **只省略 identity 块**；billing 块、`metadata.user_id`、header 和 TLS 始终生效，没有"整层关闭"的开关
-- 版本：启动时及每 24 小时从 npm registry `@anthropic-ai/claude-code/latest` 拉取（不走 Clove 配置的代理；环境变量 `HTTP(S)_PROXY` 仍生效），只升不降，失败保留原值，兜底为 `FALLBACK_CLI_VERSION`；上游返回 400 `... version Y or newer is required` 时立即升到 Y 并重试一次。`CLAUDE_CODE_VERSION` 固定版本并关闭拉取与自动升级，**只能**通过环境变量或 `config.json` 设置，不在设置 API / 管理页里
+- 版本：启动时及每 24 小时从 npm registry `@anthropic-ai/claude-code/latest` 拉取（不走 Clove 配置的代理；环境变量 `HTTP(S)_PROXY` 仍生效），只升不降，失败保留原值，兜底为 `FALLBACK_CLI_VERSION`；上游返回 400 `... version Y or newer is required` 时立即升到 Y 并重试一次。`CLAUDE_CODE_VERSION` 固定版本并关闭拉取与自动升级，**只能**通过环境变量设置，不在设置 API / 管理页里：管理页每次保存设置都会重写 `config.json` 并丢掉未知键，写在 `config.json` 里的值下次保存后就没了
 - `/v1/models`（路由代理与模型发现）用同一套 software header（去掉 session / prompt / request-class / `Content-Type`），`anthropic-version` 固定；**不再透传客户端的 `anthropic-version` / `anthropic-request-id`**
 - **合并前必须跑的真实 token 冒烟**（用户手动）：`CLOVE_OAT=<token> uv run python scripts/probe_oauth.py --messages`，覆盖版本门禁模型的流式 + 非流式 200、重复前缀的 `cache_read_input_tokens > 0`、`/v1/models`。429 解析无法强制触发，不在覆盖范围内
 
@@ -330,7 +330,7 @@ OAuth 排障请先跑 `uv run python scripts/probe_oauth.py`（`CLOVE_SK=<sessio
 - `OAUTH_AUTHORIZE_URL` / `OAUTH_REDIRECT_URI` OAuth 授权与回调地址；URL 类设置有 `before` 校验器会剥离首尾多余引号/空白（规避 docker-compose `- OAUTH_TOKEN_URL="..."` 把引号当字面量的坑）
 - `MAX_CONCURRENT_OAUTH_UPGRADES` 默认 `3`，限制全局并发 cookie→OAuth 升级
 - `INJECT_CLAUDE_CODE_SYSTEM_PROMPT`（默认 `true`）：`false` 只省略 OAuth 请求里的 Claude Code identity 块，billing 块、`metadata.user_id`、header、TLS 不受影响
-- `CLAUDE_CODE_VERSION` 固定 OAuth 链路呈现的 Claude Code 版本，关闭 npm 拉取与版本门禁自动升级；仅环境变量 / `config.json`，不在设置 API 里
+- `CLAUDE_CODE_VERSION` 固定 OAuth 链路呈现的 Claude Code 版本，关闭 npm 拉取与版本门禁自动升级；仅环境变量（管理页保存设置会重写 `config.json` 并丢掉该键），不在设置 API 里
 - `PROXY_URL` 旧固定代理配置，启动时会迁移到新 `proxy` 配置
 - `NO_FILESYSTEM_MODE` 会禁用文件读写，账户和配置只保存在内存中
 - `ACCESS_LOG_ENABLED`（默认 `false`）开启结构化请求访问日志

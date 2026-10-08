@@ -35,7 +35,7 @@
 | 7 | `X-Stainless-Lang` | `js` |
 | 8 | `X-Stainless-OS` | `Linux` |
 | 9 | `X-Stainless-Package-Version` | `0.112.1` |
-| 10 | `X-Stainless-Retry-Count` | `0` |
+| 10 | `X-Stainless-Retry-Count` | `0`；传输层重试的那一次为 `1` |
 | 11 | `X-Stainless-Runtime` | `node` |
 | 12 | `X-Stainless-Runtime-Version` | `v26.3.0` |
 | 13 | `X-Stainless-Timeout` | `600` |
@@ -86,7 +86,15 @@ TLS 1.2–1.3；`key_shares_limit=2`；`http1_only`。扩展顺序就是 BoringS
 传输层要点：
 
 - 每个代理 URL 缓存一个 rnet `Client`（LRU 64），连接与 TLS 会话票据按代理复用、不跨代理
-- 只用系统信任根；超时按请求传入（运行时可改）；复用连接被重置时先在新连接上重试一次，再判定代理不健康
+- 只用系统信任根；超时按请求传入，未指定时在调用时读取 `REQUEST_TIMEOUT`
+- 连接被关闭或重置（rnet `RequestError` / `ConnectionResetError`）时在新连接上重试一次，重试那次带
+  `X-Stainless-Retry-Count: 1`。rnet 分不清失效的复用连接和请求发出后才断开的新连接，所以非幂等的
+  POST 可能被上游收到两次；CLI 用的 Stainless SDK 也是这样重试的
+- 重试后仍失败、连接被拒或 TLS 失败时把代理标记为不健康并返回 `ProxyConnectionError`；超时不标记
+  （`REQUEST_TIMEOUT` 是整个请求的总时长，慢生成不代表代理坏了）
+- 依赖 `rnet` extra：没有它时 `create_oauth_session` 抛 `RuntimeError`，不回退到其他 HTTP 客户端，
+  分到 OAuth 账户的请求直接报错；Web 链路不依赖 rnet，没有可用 OAuth 账户时照常回退过去。Docker 镜像
+  始终装有 rnet
 - `orig_headers` 传**普通 `list[str]`**（`OrigHeaderMap(init=...)` 会把名字转小写）；`Connection` 与
   `Accept-Encoding` 必须显式设置；`default_headers=False`（它也会屏蔽 `Client(headers=...)`，所以
   header 按请求传）；gzip / br / zstd / deflate 解码开启，解码后的响应 header 不再带
@@ -129,8 +137,9 @@ Clove 无状态地派生这两个 id，并保持 UUIDv4 形态（sha256 → 16 �
 - 客户端提供的合法值优先采用：JSON `metadata.user_id` 里的 v4 `session_id`、v4
   `x-claude-code-prompt-id`、`x-claude-code-request-class`
 - 裁剪或压缩旧消息的客户端会让 id 变化，这是已知取舍
-- `cc_prev_req` 无法无状态得到：用进程内有界 map（session id → 上一个上游响应的 `request-id`，最多
-  4096 条，不持久化），重启后每个会话的第一个请求没有该字段
+- `cc_prev_req` 无法无状态得到：用进程内有界 map（实际发出的 session id → 上一个上游响应的
+  `request-id`，采用了客户端的 session id 时键就是它；最多 4096 条，不持久化），重启后每个会话的第一个
+  请求没有该字段
 
 ### cc_version 后缀
 
@@ -162,7 +171,8 @@ CLIProxyAPI（见文末）。
   只升不降，失败保留原值；兜底为 `FALLBACK_CLI_VERSION`（抓包版本）
 - Anthropic 按模型设置 CLI 版本门槛（400 `Claude Code X does not support this model; version Y or newer is required`）：
   收到时立即升到 Y 并重试一次
-- `CLAUDE_CODE_VERSION` 固定版本，并关闭拉取与自动升级
+- `CLAUDE_CODE_VERSION` 固定版本，并关闭拉取与自动升级。只能用环境变量设置：管理页每次保存设置都会重写
+  `config.json` 并丢掉未知键，写在 `config.json` 里的值下次保存后就没了
 
 ## 限流探测
 

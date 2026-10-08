@@ -154,7 +154,8 @@ class Settings(BaseSettings):
     claude_api_baseurl: HttpUrl = Field(
         default="https://api.anthropic.com", env="CLAUDE_API_BASEURL"
     )
-    # Env / config file only, deliberately not in the settings API.
+    # Env only, deliberately not in the settings API: an admin settings save
+    # rewrites config.json and drops keys it does not know.
     claude_code_version: Optional[str] = Field(
         default=None,
         env="CLAUDE_CODE_VERSION",
