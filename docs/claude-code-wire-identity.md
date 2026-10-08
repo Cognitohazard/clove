@@ -108,7 +108,7 @@ TLS 1.2–1.3；`key_shares_limit=2`；`http1_only`。扩展顺序就是 BoringS
 
 - **billing 块**：`x-anthropic-billing-header: cc_version=<version>.<suffix>; cc_entrypoint=cli; cch=<cch>; cc_prev_req=<request-id>; cc_prompt_id=<prompt id>; cc_turn_origin=human;`
   - 字段顺序固定；`cc_prev_req` 仅在同一会话的第二个及以后的 main 请求出现，位于 `cch` 与
-    `cc_prompt_id` 之间，值为**上一个 main 响应**的 `request-id` 响应头（auxiliary 请求不计）
+    `cc_prompt_id` 之间，值为**上一个 main 响应**的 `request-id` 响应头（Clove 代理的请求一律以 main 发出；限流探测不计）
   - 客户端自带的 billing 块（以 `x-anthropic-billing-header:` 开头）一律丢弃
 - **identity 块**：`You are Claude Code, Anthropic's official CLI for Claude.`
   - 客户端 system 的首个块文本恰为这一行时，保留客户端那块（连同它的 `cache_control`），不再插入我们的
@@ -135,9 +135,11 @@ Clove 无状态地派生这两个 id，并保持 UUIDv4 形态（sha256 → 16 �
 - session id：`device_id` + 规范化的 `messages[0]`（递归去掉 `cache_control`，`sort_keys`，紧凑格式）
 - prompt id：session id + 人类轮数（**不含任何 `tool_result` 块**的 user 消息才算新一轮）
 - 客户端提供的合法值优先采用：JSON `metadata.user_id` 里的 v4 `session_id`、v4
-  `x-claude-code-prompt-id`、`x-claude-code-request-class`
+  `x-claude-code-prompt-id`
+- 客户端的 `x-claude-code-request-class` 不采用，一律发 `main`：采用 `auxiliary` 会得到「auxiliary 类 +
+  main 的完整 billing 块与 prompt id」的半成品形状，CLI 从不这样发（它真正的 auxiliary 请求见「刻意不复制的部分」）
 - 裁剪或压缩旧消息的客户端会让 id 变化，这是已知取舍
-- `cc_prev_req` 无法无状态得到：用进程内有界 map（实际发出的 session id → 上一个上游响应的
+- `cc_prev_req` 无法无状态得到：用进程内有界 map（实际发出的 session id → 上一个 main 响应的
   `request-id`，采用了客户端的 session id 时键就是它；最多 4096 条，不持久化），重启后每个会话的第一个
   请求没有该字段
 
@@ -167,12 +169,18 @@ CLIProxyAPI（见文末）。
 
 ## 版本
 
-- `cli_version()`：启动时及每 24 小时从 npm registry `@anthropic-ai/claude-code/latest` 拉取（不走 Clove 配置的代理；环境变量 `HTTP(S)_PROXY` 仍生效），
-  只升不降，失败保留原值；兜底为 `FALLBACK_CLI_VERSION`（抓包版本）
+- `cli_version()` 默认是 `FALLBACK_CLI_VERSION`，即抓包版本（当前 `2.1.283`，与 fixture 的 `_cli_version`
+  一致）。运行时不跟随 npm：新版 CLI 可能改了线上格式，只换版本号会发出「新版本号 + 旧版本布局」这种真实
+  CLI 不会发送的组合
 - Anthropic 按模型设置 CLI 版本门槛（400 `Claude Code X does not support this model; version Y or newer is required`）：
-  收到时立即升到 Y 并重试一次
-- `CLAUDE_CODE_VERSION` 固定版本，并关闭拉取与自动升级。只能用环境变量设置：管理页每次保存设置都会重写
-  `config.json` 并丢掉未知键，写在 `config.json` 里的值下次保存后就没了
+  收到时升到 Y（只升不降，仅在本进程内有效）并重试一次。这是安全网，不是升级途径
+- `CLAUDE_CODE_VERSION` 覆盖默认版本，并关闭门禁自动升级（门禁 400 直接返回给客户端）。只能用环境变量设置：
+  管理页每次保存设置都会重写 `config.json` 并丢掉未知键，写在 `config.json` 里的值下次保存后就没了
+- 升级途径：每日漂移检测（`.github/workflows/claude-code-drift.yml`，抓 npm latest 与 fixture 比对）报出 drift
+  后，维护者用 `scripts/capture_claude_code.py --write` 重新抓包，按新指纹更新
+  `app/utils/claude_code_identity.py` 的常量与 fixture，再跑测试。截至 2026-10-07，npm latest 是 2.1.293，
+  已与 2.1.283 不同：billing 块新增 `cc_prompt_index` / `cc_turn_index`，`X-Stainless-Package-Version` 变为
+  `0.128.0`，另有两个新 beta。预期下一步就是一个升级到 2.1.293 的单元
 
 ## 限流探测
 

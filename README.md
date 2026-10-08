@@ -38,9 +38,15 @@ Configurable `inject_claude_code_system_prompt` setting (default: `true`). It co
 
 **Where:** `app/core/config.py`, `app/utils/claude_code_identity.py`, `app/processors/claude_ai/claude_api_processor.py`
 
+### Presented Claude Code Version
+
+The OAuth path presents the Claude Code version its wire shape was captured from (`FALLBACK_CLI_VERSION`, currently `2.1.283`). It does not follow npm's latest release at runtime: a newer CLI may change the wire shape, and a new version number on the old shape is a combination no real CLI sends. `CLAUDE_CODE_VERSION` (environment only) overrides it and turns off the automatic bump. A `400 ... version Y or newer is required` raises the version to Y for the life of the process and retries once. The daily drift workflow is what signals a new CLI: re-capture with `scripts/capture_claude_code.py --write`, update the constants in `app/utils/claude_code_identity.py` and the fixture, and run the tests. As of 2026-10-07 npm's latest (2.1.293) already differs (new billing fields `cc_prompt_index` / `cc_turn_index`, Stainless package version `0.128.0`, two new betas), so a bump to it is the expected next step.
+
+**Where:** `app/utils/claude_code_identity.py`, `.github/workflows/claude-code-drift.yml`, `scripts/capture_claude_code.py`
+
 ### Messages API Retry Policy
 
-`POST /v1/messages` has no route-level retry wrapper, so a failed generation is not silently re-run. The OAuth path re-sends a request in two cases only, once each: when the connection is closed or reset before a response arrives (as the Claude Code CLI's SDK does; the retried attempt carries `X-Stainless-Retry-Count: 1`, and because the first attempt may already have reached Anthropic, that request can be generated twice), and after a `400 ... version Y or newer is required`, with the presented CLI version raised to Y.
+`POST /v1/messages` has no route-level retry wrapper, so a failed generation is not silently re-run. The OAuth path re-sends a request in two cases only, once each: when the connection is closed or reset before a response arrives (as the Claude Code CLI's SDK does; the retried attempt carries `X-Stainless-Retry-Count: 1`, and because the first attempt may already have reached Anthropic, that request can be generated twice), and after a `400 ... version Y or newer is required`, with the presented CLI version raised to Y (unless `CLAUDE_CODE_VERSION` pins it).
 
 Shared HTTP sessions for other callers keep their configurable transport retries (`REQUEST_RETRIES`, `REQUEST_RETRY_INTERVAL`).
 
