@@ -161,7 +161,7 @@ class Settings(BaseSettings):
         env="CLAUDE_CODE_VERSION",
         description=(
             "Pin the Claude Code version (MAJOR.MINOR.PATCH) presented on the OAuth "
-            "path; unset, it follows npm's latest release"
+            "path; unset, it is the captured CLI version"
         ),
     )
 

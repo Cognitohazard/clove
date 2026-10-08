@@ -1,6 +1,3 @@
-import asyncio
-import contextlib
-
 from loguru import logger
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -21,16 +18,7 @@ from app.services.session import session_manager
 from app.services.tool_call import tool_call_manager
 from app.services.cache import cache_service
 from app.services.proxy import proxy_service
-from app.utils.claude_code_identity import pin_cli_version, refresh_cli_version
-
-CLI_VERSION_REFRESH_SECONDS = 24 * 60 * 60
-
-
-async def _refresh_cli_version_forever() -> None:
-    """Follow npm's latest Claude Code release: now, then daily (never raises)."""
-    while True:
-        await refresh_cli_version()
-        await asyncio.sleep(CLI_VERSION_REFRESH_SECONDS)
+from app.utils.claude_code_identity import pin_cli_version
 
 
 def migrate_proxy_config():
@@ -88,12 +76,10 @@ async def lifespan(app: FastAPI):
     # 迁移旧的代理配置
     migrate_proxy_config()
 
-    # Claude Code version presented on the OAuth path: pinned, or followed from npm
-    cli_version_task = None
+    # Claude Code version presented on the OAuth path; the default is the
+    # captured CLI version (FALLBACK_CLI_VERSION)
     if settings.claude_code_version:
         pin_cli_version(settings.claude_code_version)
-    else:
-        cli_version_task = asyncio.create_task(_refresh_cli_version_forever())
 
     # Load accounts
     account_manager.load_accounts()
@@ -121,11 +107,6 @@ async def lifespan(app: FastAPI):
     await tool_call_manager.cleanup_all()
     await cache_service.cleanup_all()
     await proxy_service.shutdown()
-
-    if cli_version_task is not None:
-        cli_version_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await cli_version_task
 
 
 app = FastAPI(

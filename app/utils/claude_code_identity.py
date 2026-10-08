@@ -33,8 +33,6 @@ from dataclasses import dataclass
 import xxhash
 from loguru import logger
 
-from app.core.http_client import create_plain_session
-
 # --------------------------------------------------------------------------
 # Captured constants (Claude Code 2.1.283)
 # --------------------------------------------------------------------------
@@ -157,9 +155,9 @@ _VERSION_GATE = re.compile(r"version (\d+\.\d+\.\d+) or newer is required")
 # CLI version state
 # --------------------------------------------------------------------------
 
-NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
-_NPM_TIMEOUT_SECONDS = 10
-
+# Defaults to the captured version: a newer CLI may change the wire shape, so
+# presenting a newer version takes a re-capture, not just a new number. Only a
+# version-gate 400 (``bump_cli_version``) raises it at runtime.
 _version = FALLBACK_CLI_VERSION
 _pinned = False
 
@@ -179,7 +177,7 @@ def cli_version() -> str:
 def pin_cli_version(version: str | None) -> None:
     """Pin the presented version (``CLAUDE_CODE_VERSION``); ``None`` unpins.
 
-    While pinned, ``refresh_cli_version`` and ``bump_cli_version`` do nothing.
+    While pinned, ``bump_cli_version`` does nothing.
     Unpinning never leaves the version below ``FALLBACK_CLI_VERSION``.
     Raises ``ValueError`` for anything other than ``MAJOR.MINOR.PATCH``.
     """
@@ -223,38 +221,6 @@ def parse_version_gate(message: str) -> str | None:
     ``... version Y or newer is required``), else ``None``."""
     match = _VERSION_GATE.search(message)
     return match.group(1) if match else None
-
-
-async def refresh_cli_version() -> None:
-    """Adopt npm's latest Claude Code version if it is newer; never raises.
-
-    Any failure (network, HTTP status, JSON, malformed version) is logged and
-    the current value is kept. The fetch deliberately bypasses Clove's proxy
-    settings (``proxy=None``); an ``HTTP(S)_PROXY`` from the environment still
-    applies.
-    """
-    if _pinned:
-        return
-    try:
-        async with create_plain_session(
-            timeout=_NPM_TIMEOUT_SECONDS, proxy=None
-        ) as session:
-            response = await session.request("GET", NPM_LATEST_URL)
-            if response.status_code != 200:
-                raise ValueError(f"HTTP {response.status_code}")
-            data = await response.json()
-    except Exception as exc:
-        logger.warning(
-            f"Claude Code version refresh failed, keeping {_version}: {exc!r}"
-        )
-        return
-    latest = data.get("version") if isinstance(data, dict) else None
-    if _semver(latest) is None:
-        logger.warning(
-            f"npm returned no usable Claude Code version ({latest!r}), keeping {_version}"
-        )
-        return
-    bump_cli_version(latest)
 
 
 # --------------------------------------------------------------------------

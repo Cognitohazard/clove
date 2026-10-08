@@ -52,7 +52,6 @@ from app.utils.claude_code_identity import (  # noqa: E402
     finalize_messages_body,
     parse_version_gate,
     pin_cli_version,
-    refresh_cli_version,
 )
 
 TOKEN_URLS = [
@@ -240,8 +239,6 @@ def _usage(text: str) -> dict:
 async def probe_messages(token: str, model: str) -> bool:
     if settings.claude_code_version:
         pin_cli_version(settings.claude_code_version)
-    else:
-        await refresh_cli_version()
     proxy = await proxy_service.get_proxy()
     print(
         f"=== OAuth /v1/messages as Claude Code {cli_version()} "

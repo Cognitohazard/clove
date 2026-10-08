@@ -12,10 +12,8 @@ import re
 import uuid
 from pathlib import Path
 
-import httpx
 import pytest
 
-from app.core.config import settings
 from app.utils import claude_code_identity as cci
 
 FIXTURE = json.loads(
@@ -814,26 +812,6 @@ def _fresh_version_state(monkeypatch):
     monkeypatch.setattr(cci, "_pinned", False)
 
 
-def _fake_npm(monkeypatch, handler):
-    """Route refresh_cli_version's plain (httpx) session through ``handler``.
-
-    Returns ``(url, proxy)`` for every request sent.
-    """
-    seen = []
-    real_client = httpx.AsyncClient
-
-    def client(**kwargs):
-        def recording_handler(request):
-            seen.append((str(request.url), kwargs.get("proxy")))
-            return handler(request)
-
-        return real_client(transport=httpx.MockTransport(recording_handler), **kwargs)
-
-    monkeypatch.setattr(httpx, "AsyncClient", client)
-    monkeypatch.setattr(settings, "request_retry_interval", 0)
-    return seen
-
-
 def test_bump_is_upward_only_and_numeric(monkeypatch):
     _fresh_version_state(monkeypatch)
     assert cci.bump_cli_version("2.1.1000") is True
@@ -853,22 +831,15 @@ def test_bump_rejects_malformed_versions(monkeypatch, garbage):
     assert cci.cli_version() == cci.FALLBACK_CLI_VERSION
 
 
-async def test_pin_blocks_refresh_and_bump(monkeypatch):
+def test_pin_blocks_bump(monkeypatch):
     _fresh_version_state(monkeypatch)
-    seen = _fake_npm(
-        monkeypatch, lambda request: httpx.Response(200, json={"version": "9.9.9"})
-    )
-
     cci.pin_cli_version("2.1.100")
     assert cci.bump_cli_version("9.9.9") is False
-    await cci.refresh_cli_version()
     assert cci.cli_version() == "2.1.100"
-    assert seen == []
 
     cci.pin_cli_version(None)
-    await cci.refresh_cli_version()
+    assert cci.bump_cli_version("9.9.9") is True
     assert cci.cli_version() == "9.9.9"
-    assert seen == [(cci.NPM_LATEST_URL, None)]  # never through Clove's proxy
 
 
 @pytest.mark.parametrize(
@@ -895,36 +866,3 @@ def test_parse_version_gate_reads_the_demanded_version():
     )
     assert cci.parse_version_gate(gate) == "2.1.300"
     assert cci.parse_version_gate("system: Invalid model name") is None
-
-
-def _connect_error(request):
-    raise httpx.ConnectError("registry unreachable", request=request)
-
-
-@pytest.mark.parametrize(
-    "handler",
-    [
-        lambda request: httpx.Response(503, text="unavailable"),
-        lambda request: httpx.Response(200, content=b"<html>not json"),
-        lambda request: httpx.Response(200, json=["2.1.300"]),
-        lambda request: httpx.Response(200, json={"version": "2.1"}),
-        lambda request: httpx.Response(200, json={"version": None}),
-        lambda request: httpx.Response(200, json={"version": "2.1.1"}),
-        _connect_error,
-    ],
-    ids=[
-        "http-503",
-        "bad-json",
-        "not-an-object",
-        "bad-version",
-        "no-version",
-        "older",
-        "down",
-    ],
-)
-async def test_refresh_keeps_the_last_good_version(monkeypatch, handler):
-    _fresh_version_state(monkeypatch)
-    cci.bump_cli_version("2.1.290")
-    _fake_npm(monkeypatch, handler)
-    await cci.refresh_cli_version()
-    assert cci.cli_version() == "2.1.290"
