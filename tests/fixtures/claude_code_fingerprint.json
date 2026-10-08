@@ -1,5 +1,5 @@
 {
-  "_comment": "Structural fingerprint of Claude Code's main /v1/messages request (OAuth, interactive cli entrypoint). No prompt text, no paths. Regenerate with scripts/capture_claude_code.py --write.",
+  "_comment": "Structural fingerprint of Claude Code's main /v1/messages request (OAuth, interactive cli entrypoint). No prompt text, no paths. Regenerate with scripts/capture_claude_code.py --write. Never read at runtime: the constants in app/utils/claude_code_identity.py are the source of truth and a test pins them to this file.",
   "_cli_version": "2.1.283",
   "tls": {
     "ciphers": [
@@ -21,6 +21,7 @@
       "0x002f",
       "0x0035"
     ],
+    "compression_methods_hex": "0100",
     "extension_order": [
       0,
       23,
