@@ -106,6 +106,7 @@ TLS_PROFILE = {
         "0x002f",
         "0x0035",
     ],
+    "compression_methods_hex": "0100",
     "extension_order": [0, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43],
     "_conditional_extensions_note": (
         "21 (padding) and 41 (pre_shared_key) may appear depending on hello "
