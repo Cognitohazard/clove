@@ -23,6 +23,7 @@ from app.utils.claude_code_identity import (
     build_messages_headers,
     cli_version,
     serialize,
+    user_id_json,
 )
 
 # The quota probe Claude Code 2.1.293 sends at startup: an auxiliary request with
@@ -38,28 +39,24 @@ _QUOTA_PROBE_BETAS = (
 def _quota_probe_request(account: Account) -> Tuple[List[Tuple[str, str]], bytes]:
     """Headers and body of the CLI's quota probe for ``account`` (a fresh session)."""
     session_id = str(uuid.uuid4())
-    headers = [
-        (name, _QUOTA_PROBE_BETAS if name == "anthropic-beta" else value)
-        for name, value in build_messages_headers(
-            account.oauth_token.access_token,
-            client_beta_header=None,
-            session_id=session_id,
-            prompt_id="",
-            cli_version=cli_version(),
-            request_class="auxiliary",
-        )
-        if name != "x-claude-code-prompt-id"
-    ]
-    user_id = {
-        "device_id": account.device_id,
-        "account_uuid": account.oauth_token.account_uuid,
-        "session_id": session_id,
-    }
+    headers = build_messages_headers(
+        account.oauth_token.access_token,
+        client_beta_header=None,
+        session_id=session_id,
+        prompt_id=None,
+        cli_version=cli_version(),
+        request_class="auxiliary",
+        anthropic_beta=_QUOTA_PROBE_BETAS,
+    )
     body = {
         "model": _QUOTA_PROBE_MODEL,
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "quota"}],
-        "metadata": {"user_id": json.dumps(user_id, separators=(",", ":"))},
+        "metadata": {
+            "user_id": user_id_json(
+                account.device_id, account.oauth_token.account_uuid, session_id
+            )
+        },
     }
     return headers, serialize(body)
 

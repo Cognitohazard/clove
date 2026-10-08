@@ -645,14 +645,32 @@ def _adopted_session_id(client_user_id: dict) -> str | None:
     return session_id.lower() if _is_uuid4(session_id) else None
 
 
+def _effective_session_id(client_user_id: dict, device_id: str, body: dict) -> str:
+    return _adopted_session_id(client_user_id) or derive_session_id(device_id, body)
+
+
 def effective_session_id(device_id: str, body: dict) -> str:
     """The session id ``finalize_messages_body`` sends for ``body``.
 
     The client's UUIDv4 ``session_id`` from a JSON ``metadata.user_id`` when it
     has one, else ``derive_session_id``.
     """
-    adopted = _adopted_session_id(_client_user_id(body.get("metadata")))
-    return adopted or derive_session_id(device_id, body)
+    return _effective_session_id(_client_user_id(body.get("metadata")), device_id, body)
+
+
+def user_id_json(
+    device_id: str, account_uuid: str, session_id: str, extra: dict | None = None
+) -> str:
+    """``metadata.user_id`` as the CLI sends it: a compact JSON object string with
+    ``device_id``, ``account_uuid`` and ``session_id`` first, then ``extra`` keys."""
+    user_id = {
+        "device_id": device_id,
+        "account_uuid": account_uuid,
+        "session_id": session_id,
+    }
+    for key, value in (extra or {}).items():
+        user_id.setdefault(key, value)
+    return json.dumps(user_id, separators=(",", ":"), ensure_ascii=False)
 
 
 def _system_blocks(
@@ -734,7 +752,7 @@ def finalize_messages_body(
     client_user_id = _client_user_id(client_metadata)
     adopted_session_id = _adopted_session_id(client_user_id)
     if session_id is None:
-        session_id = adopted_session_id or derive_session_id(device_id, body)
+        session_id = _effective_session_id(client_user_id, device_id, body)
     if _is_uuid4(client_prompt_id):
         prompt_id = client_prompt_id.lower()
     else:
@@ -763,16 +781,13 @@ def finalize_messages_body(
         body.get("system"), include_identity=include_identity, billing_text=billing_text
     )
 
-    user_id = {
-        "device_id": device_id,
-        "account_uuid": account_uuid,
-        "session_id": session_id,
-    }
-    if adopted_session_id:
-        for key, value in client_user_id.items():
-            user_id.setdefault(key, value)
     metadata = dict(client_metadata) if isinstance(client_metadata, dict) else {}
-    metadata["user_id"] = json.dumps(user_id, separators=(",", ":"), ensure_ascii=False)
+    metadata["user_id"] = user_id_json(
+        device_id,
+        account_uuid,
+        session_id,
+        client_user_id if adopted_session_id else None,
+    )
 
     unsigned = serialize(_with_cli_key_order(body, system, metadata))
     offset, cch = _sign(unsigned)
@@ -837,15 +852,23 @@ def build_messages_headers(
     *,
     client_beta_header: str | None,
     session_id: str,
-    prompt_id: str,
+    prompt_id: str | None,
     cli_version: str,
     request_class: str = "main",
+    anthropic_beta: str | None = None,
 ) -> list[tuple[str, str]]:
-    """Ordered ``/v1/messages`` headers; ``Host`` and ``Content-Length`` are the transport's."""
+    """Ordered ``/v1/messages`` headers; ``Host`` and ``Content-Length`` are the transport's.
+
+    ``prompt_id=None`` omits the prompt-id header and ``anthropic_beta`` replaces
+    the merged beta list: the CLI's auxiliary requests send neither as main does.
+    """
     values = _common_headers(access_token, client_beta_header, cli_version)
     values["X-Claude-Code-Session-Id"] = session_id
-    values["x-claude-code-prompt-id"] = prompt_id
+    if prompt_id is not None:
+        values["x-claude-code-prompt-id"] = prompt_id
     values["x-claude-code-request-class"] = request_class
+    if anthropic_beta is not None:
+        values["anthropic-beta"] = anthropic_beta
     return _in_cli_order(values)
 
 

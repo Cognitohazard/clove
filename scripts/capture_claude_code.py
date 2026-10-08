@@ -633,7 +633,7 @@ def _build_tls(hello: dict) -> dict:
 def _classify_headers(
     header_order: list[str], header_values: dict[str, str]
 ) -> tuple[dict, dict]:
-    """Split headers into (static_headers, platform_headers) per D8.
+    """Split headers into (static_headers, platform_headers).
 
     Per-request UUID headers, Authorization, Host, Content-Length, User-Agent
     and anthropic-beta are excluded: their values are secret, per-request, or
