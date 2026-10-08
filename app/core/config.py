@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 from app.models.proxy import ProxySettings, ProxyMode
 
+
 class Settings(BaseSettings):
     """Application settings with environment variable and JSON config support."""
 
@@ -152,6 +153,15 @@ class Settings(BaseSettings):
     claude_ai_url: HttpUrl = Field(default="https://claude.ai", env="CLAUDE_AI_URL")
     claude_api_baseurl: HttpUrl = Field(
         default="https://api.anthropic.com", env="CLAUDE_API_BASEURL"
+    )
+    # Env / config file only, deliberately not in the settings API.
+    claude_code_version: Optional[str] = Field(
+        default=None,
+        env="CLAUDE_CODE_VERSION",
+        description=(
+            "Pin the Claude Code version (MAJOR.MINOR.PATCH) presented on the OAuth "
+            "path; unset, it follows npm's latest release"
+        ),
     )
 
     # Cookies
@@ -319,9 +329,7 @@ class Settings(BaseSettings):
         description="OAuth redirect URI for authorization flow",
     )
 
-    @field_validator(
-        "api_keys", "admin_api_keys", "cookies", "pad_tokens"
-    )
+    @field_validator("api_keys", "admin_api_keys", "cookies", "pad_tokens")
     def parse_comma_separated(cls, v: str | List[str]) -> List[str]:
         """Parse comma-separated string."""
         if isinstance(v, str):
@@ -335,6 +343,7 @@ class Settings(BaseSettings):
         "oauth_authorize_url",
         "oauth_token_url",
         "oauth_redirect_uri",
+        "claude_code_version",
         mode="before",
     )
     def strip_surrounding_quotes(cls, v: Any) -> Any:

@@ -1,17 +1,17 @@
-import json
+import asyncio
+import re
 
 from app.core.http_client import (
     Response,
-    AsyncSession,
-    create_session,
+    create_oauth_session,
     RequestException,
 )
 from datetime import datetime, timedelta, UTC
-from typing import Dict, Optional
+from typing import Optional
 from loguru import logger
 from fastapi.responses import StreamingResponse
 
-from app.models.claude import MessagesAPIRequest
+from app.core.account import Account
 from app.core.observability import current_span
 from app.core.observability.usage_tap import create_usage_tap
 from app.processors.base import BaseProcessor
@@ -23,37 +23,67 @@ from app.core.exceptions import (
     ClaudeHttpError,
     ClaudeRateLimitedError,
     InvalidModelNameError,
+    MalformedRequestBodyError,
     NoAccountsAvailableError,
     OAuthAuthenticationNotAllowedError,
     ProxyConnectionError,
 )
 from app.core.config import settings
-from app.utils.oauth_headers import build_oauth_headers
+from app.utils.claude_code_identity import (
+    FinalizedBody,
+    build_messages_headers,
+    bump_cli_version,
+    cli_version,
+    derive_session_id,
+    finalize_messages_body,
+)
+from app.views.messages_view import MessagesRequestView
+
+# Upstream's per-model CLI version gate: "Claude Code X does not support this
+# model; version Y or newer is required".
+_VERSION_GATE = re.compile(r"version (\d+\.\d+\.\d+) or newer is required")
+# A Claude Code client's own request class ("main", "auxiliary", ...) is adopted
+# when it looks like one.
+_REQUEST_CLASS = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+# Finalizing a body costs ~8 ms per 234 KB (~84 ms for a 7 MB image body);
+# above this size it runs off the event loop.
+_FINALIZE_OFFLOAD_BYTES = 1 << 20
+# ponytail: in-memory and per process, capped at 4096 conversations with the
+# least recently answered dropped first. A restart or an eviction only costs that
+# conversation's next turn its cc_prev_req; persist it if upstream starts caring.
+_PREV_REQUEST_IDS_MAX = 4096
+
+
+async def _read_error(response: Response) -> tuple[dict, str, str]:
+    """(body, error type, error message) of an upstream error response."""
+    try:
+        error_data = await response.json()
+        error_type = error_data.get("error", {}).get("type", "unknown")
+        error_message = error_data.get("error", {}).get("message", "Unknown error")
+    except Exception:
+        # Empty or invalid JSON response
+        error_data = {}
+        error_type = "empty_response"
+        error_message = f"HTTP {response.status_code} error with empty response"
+    return error_data, error_type, error_message
 
 
 class ClaudeAPIProcessor(BaseProcessor):
-    """Processor that calls Claude Messages API directly using OAuth authentication."""
+    """Processor that calls Claude Messages API directly using OAuth authentication.
 
-    LEGACY_CLAUDE_CODE_SYSTEM_PROMPT = (
-        "You are Claude Code, Anthropic's official CLI for Claude."
-    )
+    Every request goes out as the Claude Code CLI would send it: body via
+    ``finalize_messages_body``, headers via ``build_messages_headers``, transport
+    via ``create_oauth_session``.
+    """
 
     def __init__(self):
         self.messages_api_url = (
-            settings.claude_api_baseurl.encoded_string().rstrip("/") + "/v1/messages"
+            settings.claude_api_baseurl.encoded_string().rstrip("/")
+            + "/v1/messages?beta=true"
         )
-
-    async def _request_messages_api(
-        self, session: AsyncSession, request_body: bytes, headers: Dict[str, str]
-    ) -> Response:
-        """Make a single upstream Messages API request."""
-        return await session.request(
-            "POST",
-            self.messages_api_url,
-            data=request_body,
-            headers=headers,
-            stream=True,
-        )
+        # Conversation (derived session id) -> request-id of its last successful
+        # main response, which the CLI sends back as cc_prev_req.
+        self._prev_request_ids: dict[str, str] = {}
 
     async def process(self, context: ClaudeAIContext) -> ClaudeAIContext:
         """
@@ -95,39 +125,65 @@ class ClaudeAPIProcessor(BaseProcessor):
                 span.set_upstream("oauth", account_id=account.organization_uuid)
 
             with account:
-                request_body = await self._prepare_request_body(context)
-                headers = self._prepare_headers(
-                    account.oauth_token.access_token,
-                    context.messages_api_request,
-                    context.original_request,
-                )
+                inbound = context.original_request.headers
+                request_class = inbound.get("x-claude-code-request-class", "")
+                if not _REQUEST_CLASS.fullmatch(request_class):
+                    request_class = "main"
 
                 # Get proxy URL from proxy service
                 proxy_url = await proxy_service.get_proxy(
                     account_id=account.organization_uuid
                 )
-
-                session: Optional[AsyncSession] = None
-
-                async def close_session() -> None:
-                    if session:
-                        await session.close()
+                session = create_oauth_session(
+                    proxy=proxy_url, timeout=settings.request_timeout
+                )
 
                 try:
-                    session = create_session(
-                        proxy=proxy_url,
-                        timeout=settings.request_timeout,
-                        impersonate="chrome",
-                        follow_redirects=False,
-                        request_retries=1,
-                    )
-
-                    response = await self._request_messages_api(
-                        session, request_body, headers
-                    )
+                    # A version-gate 400 bumps the CLI version and is retried once.
+                    for attempt in (1, 2):
+                        conversation, finalized = await self._finalize(
+                            context.view,
+                            account,
+                            request_class=request_class,
+                            client_prompt_id=inbound.get("x-claude-code-prompt-id"),
+                        )
+                        headers = build_messages_headers(
+                            account.oauth_token.access_token,
+                            client_beta_header=inbound.get("anthropic-beta"),
+                            session_id=finalized.session_id,
+                            prompt_id=finalized.prompt_id,
+                            cli_version=finalized.cli_version,
+                            request_class=request_class,
+                        )
+                        response = await session.request(
+                            "POST",
+                            self.messages_api_url,
+                            headers=headers,
+                            data=finalized.body_bytes,
+                        )
+                        error = None
+                        if response.status_code == 400:
+                            error = await _read_error(response)
+                        gate = (
+                            _VERSION_GATE.search(error[2])
+                            if error and isinstance(error[2], str)
+                            else None
+                        )
+                        if gate:
+                            bumped = bump_cli_version(gate.group(1))
+                            # A concurrent request may already have bumped it.
+                            if attempt == 1 and (
+                                bumped or cli_version() != finalized.cli_version
+                            ):
+                                logger.warning(
+                                    f"Upstream requires Claude Code {gate.group(1)} "
+                                    f"or newer; retrying as {cli_version()}"
+                                )
+                                continue
+                        break
                 except RequestException as e:
                     # Mark proxy transport failures as retryable for non-transparent callers.
-                    await close_session()
+                    await session.close()
                     if proxy_url:
                         await proxy_service.mark_unhealthy(
                             proxy_url, reason=f"connection error: {type(e).__name__}"
@@ -153,26 +209,15 @@ class ClaudeAPIProcessor(BaseProcessor):
                     next_hour = datetime.now(UTC).replace(
                         minute=0, second=0, microsecond=0
                     ) + timedelta(hours=1)
-                    await close_session()
+                    await session.close()
                     raise ClaudeRateLimitedError(
                         resets_at=account.resets_at or next_hour
                     )
 
                 if response.status_code >= 400:
-                    # Try to parse error response
-                    try:
-                        error_data = await response.json()
-                        error_type = error_data.get("error", {}).get("type", "unknown")
-                        error_message = error_data.get("error", {}).get(
-                            "message", "Unknown error"
-                        )
-                    except Exception:
-                        # Empty or invalid JSON response
-                        error_data = {}
-                        error_type = "empty_response"
-                        error_message = (
-                            f"HTTP {response.status_code} error with empty response"
-                        )
+                    error_data, error_type, error_message = error or await _read_error(
+                        response
+                    )
 
                     # HTTP 403 with empty response and proxy: likely IP banned
                     if (
@@ -189,7 +234,7 @@ class ClaudeAPIProcessor(BaseProcessor):
                         response.status_code == 400
                         and error_message == "system: Invalid model name"
                     ):
-                        await close_session()
+                        await session.close()
                         raise InvalidModelNameError(context.messages_api_request.model)
 
                     if (
@@ -197,20 +242,25 @@ class ClaudeAPIProcessor(BaseProcessor):
                         and error_message
                         == "OAuth authentication is currently not allowed for this organization."
                     ):
-                        await close_session()
+                        await session.close()
                         raise OAuthAuthenticationNotAllowedError()
 
                     logger.error(
                         f"Claude API error: {response.status_code} - {error_data}"
                     )
                     # invalid_request_error 是请求本身有问题，重试不会改变结果
-                    await close_session()
+                    await session.close()
                     raise ClaudeHttpError(
                         url=self.messages_api_url,
                         status_code=response.status_code,
                         error_type=error_type,
                         error_message=error_message,
                         retryable=error_type != "invalid_request_error",
+                    )
+
+                if request_class == "main":
+                    self._remember_request_id(
+                        conversation, response.headers.get("request-id")
                     )
 
                 tap = create_usage_tap(span, response.headers.get("content-type", ""))
@@ -222,7 +272,7 @@ class ClaudeAPIProcessor(BaseProcessor):
                             yield chunk
                     finally:
                         await tap.close()
-                        await close_session()
+                        await session.close()
 
                 filtered_headers = {}
                 for key, value in response.headers.items():
@@ -255,48 +305,52 @@ class ClaudeAPIProcessor(BaseProcessor):
 
         return context
 
-    async def _prepare_request_body(self, context: ClaudeAIContext) -> bytes:
-        """Prepare the request body for the Claude API.
-
-        Forwards raw bytes by default (transparency). If Claude-Code system
-        prompt injection is enabled, patches the cached raw JSON in-place and
-        re-serialises — no Pydantic round-trip, so unknown upstream fields
-        survive untouched.
-        """
-        if context.view is None:
-            return await context.original_request.body()
-        if not settings.inject_claude_code_system_prompt:
-            return context.view.raw_body
-
-        data = dict(context.view.raw_json)
-        system_block = {"type": "text", "text": self.LEGACY_CLAUDE_CODE_SYSTEM_PROMPT}
-        system = data.get("system")
-        if isinstance(system, str) and system:
-            data["system"] = [system_block, {"type": "text", "text": system}]
-        elif isinstance(system, list) and system:
-            first = system[0]
-            already_injected = (
-                isinstance(first, dict)
-                and first.get("text") == self.LEGACY_CLAUDE_CODE_SYSTEM_PROMPT
-            )
-            if not already_injected:
-                data["system"] = [system_block] + system
-        else:
-            data["system"] = [system_block]
-
-        return json.dumps(data, ensure_ascii=False).encode()
-
-    def _prepare_headers(
+    async def _finalize(
         self,
-        access_token: str,
-        request: MessagesAPIRequest,
-        original_request=None,
-    ) -> Dict[str, str]:
-        client_beta = (
-            original_request.headers.get("anthropic-beta") if original_request else None
-        )
-        return build_oauth_headers(
-            access_token,
-            client_beta_header=client_beta,
-            content_type="application/json",
-        )
+        view: MessagesRequestView,
+        account: Account,
+        *,
+        request_class: str,
+        client_prompt_id: Optional[str],
+    ) -> tuple[str, FinalizedBody]:
+        """(conversation key, the CLI-shaped body) for the client's raw JSON.
+
+        ``INJECT_CLAUDE_CODE_SYSTEM_PROMPT=false`` omits only the identity block;
+        billing and ``metadata.user_id`` always apply. Only main requests carry
+        ``cc_prev_req``, as with the CLI.
+        """
+
+        def run() -> tuple[str, FinalizedBody]:
+            body = view.raw_json
+            conversation = derive_session_id(account.device_id, body)
+            prev_request_id = (
+                self._prev_request_ids.get(conversation)
+                if request_class == "main"
+                else None
+            )
+            return conversation, finalize_messages_body(
+                body,
+                device_id=account.device_id,
+                account_uuid=account.oauth_token.account_uuid,
+                client_prompt_id=client_prompt_id,
+                include_identity=settings.inject_claude_code_system_prompt,
+                prev_request_id=prev_request_id,
+            )
+
+        try:
+            if len(view.raw_body) > _FINALIZE_OFFLOAD_BYTES:
+                return await asyncio.to_thread(run)
+            return run()
+        except ValueError as exc:  # NaN / Infinity, a system of the wrong type
+            raise MalformedRequestBodyError(detail=str(exc)) from exc
+
+    def _remember_request_id(
+        self, conversation: str, request_id: Optional[str]
+    ) -> None:
+        if not request_id:
+            return
+        ids = self._prev_request_ids
+        ids.pop(conversation, None)
+        ids[conversation] = request_id
+        if len(ids) > _PREV_REQUEST_IDS_MAX:
+            del ids[next(iter(ids))]

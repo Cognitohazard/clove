@@ -1,14 +1,19 @@
 import base64
 import hashlib
 import secrets
-import time
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_fixed
 
-from app.core.http_client import Response, create_session, create_plain_session, ProxyNetworkException
+from app.core.http_client import (
+    Response,
+    create_oauth_session,
+    create_session,
+    create_plain_session,
+    ProxyNetworkException,
+)
 from loguru import logger
 
 from app.core.config import settings
@@ -24,7 +29,7 @@ from app.core.exceptions import (
     ProxyConnectionError,
 )
 from app.services.proxy import proxy_service
-from app.utils.oauth_headers import build_oauth_headers
+from app.utils.claude_code_identity import build_api_headers, cli_version
 from app.utils.retry import is_retryable_error, log_before_sleep
 
 
@@ -129,13 +134,14 @@ class OAuthAuthenticator:
         )
         async with session:
             try:
-                response: Response = await session.request(method=method, url=url, **kwargs)
+                response: Response = await session.request(
+                    method=method, url=url, **kwargs
+                )
             except ProxyNetworkException as e:
                 # Connection error: mark proxy as unhealthy and wrap as retryable AppError
                 if proxy_url:
                     await proxy_service.mark_unhealthy(
-                        proxy_url,
-                        reason=f"connection error: {type(e).__name__}"
+                        proxy_url, reason=f"connection error: {type(e).__name__}"
                     )
                 raise ProxyConnectionError(
                     proxy_url=proxy_url,
@@ -233,13 +239,15 @@ class OAuthAuthenticator:
         async with session:
             try:
                 response: Response = await session.request(
-                    method="POST", url=url, headers=headers, data=data,
+                    method="POST",
+                    url=url,
+                    headers=headers,
+                    data=data,
                 )
             except ProxyNetworkException as e:
                 if proxy_url:
                     await proxy_service.mark_unhealthy(
-                        proxy_url,
-                        reason=f"connection error: {type(e).__name__}"
+                        proxy_url, reason=f"connection error: {type(e).__name__}"
                     )
                 raise ProxyConnectionError(
                     proxy_url=proxy_url,
@@ -349,7 +357,11 @@ class OAuthAuthenticator:
 
         # Use organization_uuid for proxy selection
         response = await self._request(
-            "POST", authorize_url, account_id=organization_uuid, json=payload, headers=headers
+            "POST",
+            authorize_url,
+            account_id=organization_uuid,
+            json=payload,
+            headers=headers,
         )
 
         auth_response = await response.json()
@@ -470,11 +482,7 @@ class OAuthAuthenticator:
             token_data = await self.exchange_token(auth_code, verifier)
 
             # Update account with OAuth tokens
-            account.oauth_token = OAuthToken(
-                access_token=token_data["access_token"],
-                refresh_token=token_data["refresh_token"],
-                expires_at=time.time() + token_data["expires_in"],
-            )
+            account.oauth_token = OAuthToken.from_token_response(token_data)
             account.auth_type = AuthType.BOTH
             account.save()
 
@@ -545,10 +553,8 @@ class OAuthAuthenticator:
             )
             return RefreshResult.TRANSIENT_ERROR
 
-        account.oauth_token = OAuthToken(
-            access_token=token_data["access_token"],
-            refresh_token=token_data["refresh_token"],
-            expires_at=time.time() + token_data["expires_in"],
+        account.oauth_token = OAuthToken.from_token_response(
+            token_data, previous=account.oauth_token
         )
         account.save()
 
@@ -570,21 +576,17 @@ class OAuthAuthenticator:
 
         url = settings.claude_api_baseurl.encoded_string().rstrip("/") + "/v1/models"
         proxy_url = await proxy_service.get_proxy(account_id=account.organization_uuid)
-        session = create_session(
-            timeout=settings.request_timeout,
-            impersonate="chrome",
-            proxy=proxy_url,
-            follow_redirects=False,
+        session = create_oauth_session(
+            proxy=proxy_url, timeout=settings.request_timeout
         )
 
         try:
             async with session:
                 response = await session.request(
-                    method="GET",
-                    url=url,
-                    headers=build_oauth_headers(
-                        account.oauth_token.access_token,
-                        accept="application/json",
+                    "GET",
+                    url,
+                    headers=build_api_headers(
+                        account.oauth_token.access_token, cli_version=cli_version()
                     ),
                     params={"limit": "1000"},
                 )
