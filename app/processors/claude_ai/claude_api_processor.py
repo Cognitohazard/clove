@@ -1,5 +1,4 @@
 import asyncio
-import re
 
 from app.core.http_client import (
     OAUTH_TRANSPORT_ERRORS,
@@ -40,9 +39,6 @@ from app.utils.claude_code_identity import (
 )
 from app.views.messages_view import MessagesRequestView
 
-# A Claude Code client's own request class ("main", "auxiliary", ...) is adopted
-# when it looks like one.
-_REQUEST_CLASS = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 # Finalizing a body costs ~8 ms per 234 KB (~84 ms for a 7 MB image body);
 # above this size it runs off the event loop.
 _FINALIZE_OFFLOAD_BYTES = 1 << 20
@@ -123,10 +119,10 @@ class ClaudeAPIProcessor(BaseProcessor):
                 span.set_upstream("oauth", account_id=account.organization_uuid)
 
             with account:
+                # A client's x-claude-code-request-class is never adopted: every
+                # request goes out as main, the only class a full billing block
+                # and cc_prev_req belong to.
                 inbound = context.original_request.headers
-                request_class = inbound.get("x-claude-code-request-class", "")
-                if not _REQUEST_CLASS.fullmatch(request_class):
-                    request_class = "main"
 
                 # Get proxy URL from proxy service
                 proxy_url = await proxy_service.get_proxy(
@@ -142,7 +138,6 @@ class ClaudeAPIProcessor(BaseProcessor):
                         finalized = await self._finalize(
                             context.view,
                             account,
-                            request_class=request_class,
                             client_prompt_id=inbound.get("x-claude-code-prompt-id"),
                         )
                         headers = build_messages_headers(
@@ -151,7 +146,6 @@ class ClaudeAPIProcessor(BaseProcessor):
                             session_id=finalized.session_id,
                             prompt_id=finalized.prompt_id,
                             cli_version=finalized.cli_version,
-                            request_class=request_class,
                         )
                         response = await session.request(
                             "POST",
@@ -256,10 +250,9 @@ class ClaudeAPIProcessor(BaseProcessor):
                         retryable=error_type != "invalid_request_error",
                     )
 
-                if request_class == "main":
-                    self._remember_request_id(
-                        finalized.session_id, response.headers.get("request-id")
-                    )
+                self._remember_request_id(
+                    finalized.session_id, response.headers.get("request-id")
+                )
 
                 tap = create_usage_tap(span, response.headers.get("content-type", ""))
 
@@ -308,24 +301,18 @@ class ClaudeAPIProcessor(BaseProcessor):
         view: MessagesRequestView,
         account: Account,
         *,
-        request_class: str,
         client_prompt_id: Optional[str],
     ) -> FinalizedBody:
         """The CLI-shaped body for the client's raw JSON.
 
         ``INJECT_CLAUDE_CODE_SYSTEM_PROMPT=false`` omits only the identity block;
-        billing and ``metadata.user_id`` always apply. Only main requests carry
-        ``cc_prev_req``, looked up by the session id the body is sent with.
+        billing and ``metadata.user_id`` always apply. ``cc_prev_req`` is looked
+        up by the session id the body is sent with.
         """
 
         def run() -> FinalizedBody:
             body = view.raw_json
             session_id = effective_session_id(account.device_id, body)
-            prev_request_id = (
-                self._prev_request_ids.get(session_id)
-                if request_class == "main"
-                else None
-            )
             return finalize_messages_body(
                 body,
                 device_id=account.device_id,
@@ -333,7 +320,7 @@ class ClaudeAPIProcessor(BaseProcessor):
                 session_id=session_id,
                 client_prompt_id=client_prompt_id,
                 include_identity=settings.inject_claude_code_system_prompt,
-                prev_request_id=prev_request_id,
+                prev_request_id=self._prev_request_ids.get(session_id),
             )
 
         try:

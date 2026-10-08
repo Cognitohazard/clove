@@ -6,6 +6,7 @@ transport; the assertions are on what would go over the wire.
 
 import json
 import math
+import re
 from datetime import UTC, datetime
 
 import pytest
@@ -201,7 +202,9 @@ async def test_cc_prev_req_follows_the_adopted_client_session(wire):
     assert " cc_prev_req=req_011A2;" in _billing(a3.data)
 
 
-async def test_auxiliary_requests_neither_send_nor_record_cc_prev_req(wire):
+async def test_a_clients_request_class_is_never_adopted(wire):
+    """An inbound auxiliary class still goes out as a full main request, and its
+    request-id becomes the next turn's cc_prev_req."""
     session = wire(_ok("req_011First"), _ok("req_011Aux"), _ok("req_011Third"))
     processor = ClaudeAPIProcessor()
     await processor.process(_context())
@@ -209,10 +212,19 @@ async def test_auxiliary_requests_neither_send_nor_record_cc_prev_req(wire):
     await processor.process(_context(headers=aux))
     await processor.process(_context())
 
-    first, aux_call, third = session.calls
-    assert dict(aux_call.headers)["x-claude-code-request-class"] == "auxiliary"
-    assert "cc_prev_req" not in _billing(aux_call.data)
-    assert " cc_prev_req=req_011First;" in _billing(third.data)
+    _, aux_call, third = session.calls
+    headers = dict(aux_call.headers)
+    assert headers["x-claude-code-request-class"] == "main"
+    billing = re.fullmatch(
+        r"x-anthropic-billing-header: cc_version=2\.1\.283\.[0-9a-f]{3}; "
+        r"cc_entrypoint=cli; cch=[0-9a-f]{5}; cc_prev_req=req_011First; "
+        r"cc_prompt_id=([0-9a-f-]{36}); cc_turn_origin=human;",
+        _billing(aux_call.data),
+    )
+    assert billing is not None
+    assert headers["x-claude-code-prompt-id"] == billing.group(1)
+    assert verify_billing(aux_call.data) == (True, True)
+    assert " cc_prev_req=req_011Aux;" in _billing(third.data)
 
 
 async def test_version_gate_bumps_and_retries_exactly_once(wire):
@@ -280,26 +292,14 @@ async def test_identity_block_follows_the_setting(wire, monkeypatch, inject):
     assert texts[1:] == ([IDENTITY_TEXT] if inject else [])
 
 
-async def test_a_claude_code_clients_prompt_id_and_request_class_are_adopted(wire):
+async def test_a_claude_code_clients_prompt_id_is_adopted(wire):
     session = wire(_ok())
-    inbound = {
-        "x-claude-code-prompt-id": _PROMPT_ID,
-        "x-claude-code-request-class": "auxiliary",
-    }
+    inbound = {"x-claude-code-prompt-id": _PROMPT_ID}
     await ClaudeAPIProcessor().process(_context(headers=inbound))
 
     call = session.calls[0]
-    headers = dict(call.headers)
-    assert headers["x-claude-code-prompt-id"] == _PROMPT_ID
-    assert headers["x-claude-code-request-class"] == "auxiliary"
+    assert dict(call.headers)["x-claude-code-prompt-id"] == _PROMPT_ID
     assert f"cc_prompt_id={_PROMPT_ID};" in _billing(call.data)
-
-
-async def test_a_malformed_request_class_falls_back_to_main(wire):
-    session = wire(_ok())
-    inbound = {"x-claude-code-request-class": "Main Request!"}
-    await ClaudeAPIProcessor().process(_context(headers=inbound))
-    assert dict(session.calls[0].headers)["x-claude-code-request-class"] == "main"
 
 
 async def test_a_400_without_a_string_message_is_still_an_http_error(wire):
