@@ -234,9 +234,11 @@ def test_cch_rejects_malformed_json():
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("version, want", [("2.1.283", "a03"), ("2.1.293", "2a8")])
+@pytest.mark.parametrize(
+    "version, want", [("2.1.283", "a03"), ("2.1.293", "2a8"), ("2.1.304", "c61")]
+)
 def test_version_suffix_known_vector(version, want):
-    # Both captured from the CLI's first "Say hi" turn.
+    # All captured from the CLI's first "Say hi" turn.
     assert cci.version_suffix("Say hi", version) == want
 
 

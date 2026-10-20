@@ -1,6 +1,6 @@
 {
   "_comment": "Structural fingerprint of Claude Code's main /v1/messages request (OAuth, interactive cli entrypoint). No prompt text, no paths. Regenerate with scripts/capture_claude_code.py --write. Never read at runtime: the constants in app/utils/claude_code_identity.py are the source of truth and a test pins them to this file.",
-  "_cli_version": "2.1.293",
+  "_cli_version": "2.1.304",
   "tls": {
     "ciphers": [
       "0x1301",
@@ -43,7 +43,7 @@
     ],
     "grease": false,
     "supported_groups_ext_hex": "000811ec001d00170018",
-    "signature_algorithms_ext_hex": "0012040308040401050308050501080606010201",
+    "signature_algorithms_ext_hex": "001604030804040105030805050108060601080706030201",
     "supported_versions_ext_hex": "0403040303",
     "ec_point_formats_ext_hex": "0100",
     "psk_modes_ext_hex": "0101",
@@ -137,7 +137,6 @@
     "thinking-token-count-2026-05-13",
     "context-management-2025-06-27",
     "prompt-caching-scope-2026-01-05",
-    "mid-conversation-system-2026-04-07",
     "per-turn-control-2026-07-01",
     "mid-conversation-tool-changes-2026-07-01",
     "advanced-tool-use-2025-11-20",

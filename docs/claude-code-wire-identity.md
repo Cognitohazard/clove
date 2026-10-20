@@ -5,7 +5,7 @@
 `tests/fixtures/claude_code_fingerprint.json` 是抓包得到的结构指纹，由测试钉住两者一致，运行时从不读取。
 重新抓包与漂移检测见 `scripts/capture_claude_code.py` 与 CLAUDE.md「CLI 漂移检测」。
 
-抓包基线：Claude Code **2.1.293**（npm `@anthropic-ai/claude-code-linux-x64`，Bun 原生二进制），交互式
+抓包基线：Claude Code **2.1.304**（npm `@anthropic-ai/claude-code-linux-x64`，Bun 原生二进制），交互式
 `cli` 入口，经本地 mitmproxy、使用伪造的 `sk-ant-oat01-` token，请求全部在本地应答，不触达 Anthropic。
 另有多轮对话 + 工具循环的抓包，用于确认 `cc_prev_req`、两个 id 与 `cc_prompt_index` / `cc_turn_index` 的跨轮行为。
 
@@ -70,7 +70,7 @@ macOS 版是否同样发 MLKEM 未经验证，所以不伪装成 macOS。
 | GREASE | 无（套件、扩展、group 都没有） |
 | supported_groups | `X25519MLKEM768`, `X25519`, `P-256`, `P-384` |
 | key_share | `X25519MLKEM768` + `X25519` |
-| signature_algorithms | `ecdsa_secp256r1_sha256`, `rsa_pss_rsae_sha256`, `rsa_pkcs1_sha256`, `ecdsa_secp384r1_sha384`, `rsa_pss_rsae_sha384`, `rsa_pkcs1_sha384`, `rsa_pss_rsae_sha512`, `rsa_pkcs1_sha512`, `rsa_pkcs1_sha1` |
+| signature_algorithms | `ecdsa_secp256r1_sha256`, `rsa_pss_rsae_sha256`, `rsa_pkcs1_sha256`, `ecdsa_secp384r1_sha384`, `rsa_pss_rsae_sha384`, `rsa_pkcs1_sha384`, `rsa_pss_rsae_sha512`, `rsa_pkcs1_sha512`, `ed25519`, `ecdsa_secp521r1_sha512`, `rsa_pkcs1_sha1`（2.1.304 比 2.1.293 多了 `ed25519` 与 `ecdsa_secp521r1_sha512`） |
 | supported_versions | TLS 1.3, TLS 1.2 |
 | ec_point_formats | uncompressed |
 | psk_key_exchange_modes | `psk_dhe_ke` |
@@ -177,7 +177,7 @@ CLIProxyAPI（见文末）。
 
 ## 版本
 
-- `cli_version()` 默认是 `FALLBACK_CLI_VERSION`，即抓包版本（当前 `2.1.293`，与 fixture 的 `_cli_version`
+- `cli_version()` 默认是 `FALLBACK_CLI_VERSION`，即抓包版本（当前 `2.1.304`，与 fixture 的 `_cli_version`
   一致）。运行时不跟随 npm：新版 CLI 可能改了线上格式，只换版本号会发出「新版本号 + 旧版本布局」这种真实
   CLI 不会发送的组合
 - Anthropic 按模型设置 CLI 版本门槛（400 `Claude Code X does not support this model; version Y or newer is required`）：
@@ -192,14 +192,14 @@ CLIProxyAPI（见文末）。
 ## 限流探测
 
 CLI 自己的额度探测：haiku（`claude-haiku-4-5-20251001`）、`max_tokens: 1`、**没有 `system`、没有 billing 块**、
-没有 prompt id header，`x-claude-code-request-class: auxiliary`，自带一组 beta（2.1.293 与 2.1.283 完全相同）。
+没有 prompt id header，`x-claude-code-request-class: auxiliary`，自带一组 beta（2.1.304、2.1.293、2.1.283 完全相同）。
 Clove 的 `_probe_rate_limit` 按同样形状发送，经同一传输层。
 
 ## 刻意不复制的部分
 
 以下只在有证据表明上游会校验时再补：
 
-- CLI 的完整 beta 列表（2.1.293 发 18 个，且按模型变化）：Clove 只发两个基础 beta 加客户端自带的
+- CLI 的完整 beta 列表（2.1.304 发 17 个，比 2.1.293 少了 `mid-conversation-system-2026-04-07`，且按模型变化）：Clove 只发两个基础 beta 加客户端自带的
 - CLI 自己加的 body 字段：`context_management`、`diagnostics`（含 `previous_message_id`）、
   `output_config`、`safeguards` 等；客户端自带的照原样转发
 - 工具续请求上的 `x-claude-code-prev-tool-durations` header

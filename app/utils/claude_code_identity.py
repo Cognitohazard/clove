@@ -2,7 +2,7 @@
 
 Pure functions plus the module-level CLI version: body finalization (billing
 block, identity block, ``metadata.user_id``, ``cch``) and the ordered header
-sets the genuine CLI sends. Ground truth is Claude Code 2.1.293, captured by
+sets the genuine CLI sends. Ground truth is Claude Code 2.1.304, captured by
 ``scripts/capture_claude_code.py``; the constants below are the runtime source
 of truth and a test pins them to ``tests/fixtures/claude_code_fingerprint.json``,
 which is never read at runtime.
@@ -34,10 +34,10 @@ import xxhash
 from loguru import logger
 
 # --------------------------------------------------------------------------
-# Captured constants (Claude Code 2.1.293)
+# Captured constants (Claude Code 2.1.304)
 # --------------------------------------------------------------------------
 
-FALLBACK_CLI_VERSION = "2.1.293"
+FALLBACK_CLI_VERSION = "2.1.304"
 
 HEADER_ORDER = [
     "Accept",
@@ -115,7 +115,7 @@ TLS_PROFILE = {
     "alpn": ["http/1.1"],
     "grease": False,
     "supported_groups_ext_hex": "000811ec001d00170018",
-    "signature_algorithms_ext_hex": "0012040308040401050308050501080606010201",
+    "signature_algorithms_ext_hex": "001604030804040105030805050108060601080706030201",
     "supported_versions_ext_hex": "0403040303",
     "ec_point_formats_ext_hex": "0100",
     "psk_modes_ext_hex": "0101",
